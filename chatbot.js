@@ -1163,7 +1163,10 @@ async function getBrowser() {
         defaultViewport: null,
         args: [
           '--no-first-run',
-          '--no-default-browser-check'
+          '--no-default-browser-check',
+          '--disable-background-timer-throttling',
+          '--disable-backgrounding-occluded-windows',
+          '--disable-renderer-backgrounding'
         ],
         ignoreDefaultArgs: ['--enable-automation'],
         handleSIGINT: false,

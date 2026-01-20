@@ -526,6 +526,23 @@ async function applyVisibilityOverride(page) {
   } catch (e) {}
 }
 
+async function applyLifecycleOverrides(page) {
+  try {
+    const client = await page.target().createCDPSession();
+    // Keep the page marked as active/visible to reduce background throttling.
+    await client.send('Emulation.setIdleOverride', {
+      isUserActive: true,
+      isScreenUnlocked: true,
+    });
+    try {
+      await client.send('Page.setWebLifecycleState', { state: 'active' });
+    } catch (e) {}
+    try {
+      await client.send('Emulation.setCPUThrottlingRate', { rate: 1 });
+    } catch (e) {}
+  } catch (e) {}
+}
+
 async function waitForResponseAndRender(page, initialCount) {
   const stopTyping = startTypingAnimation();
 
@@ -728,11 +745,13 @@ async function main() {
           page = await browser.newPage();
       }
       await applyVisibilityOverride(page);
+      await applyLifecycleOverrides(page);
       await page.goto(GEMINI_URL);
   } else {
     console.log(chalk.green('Found existing Gemini tab. Switching to it...'));
     await page.bringToFront();
     await applyVisibilityOverride(page);
+    await applyLifecycleOverrides(page);
     if (page.url() !== GEMINI_URL) {
          await page.goto(GEMINI_URL);
     }

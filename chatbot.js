@@ -45,6 +45,7 @@ renderer.hr = function () {
   return '\n\n';
 };
 
+let globalBrowser = null;
 let activeStopTyping = null;
 let abortRequested = false;
 process.on('SIGINT', () => {
@@ -55,6 +56,11 @@ process.on('SIGINT', () => {
     activeStopTyping = null;
   }
   console.log(chalk.yellow('\nInterrupted. Exiting.'));
+  if (globalBrowser) {
+      try {
+          globalBrowser.disconnect();
+      } catch (e) {}
+  }
   process.exit(130);
 });
 
@@ -1230,6 +1236,7 @@ function askQuestion(query) {
 
 async function main() {
   const browser = await getBrowser();
+  globalBrowser = browser;
   
   const pages = await browser.pages();
   console.log(chalk.dim(`Found ${pages.length} open tabs.`));

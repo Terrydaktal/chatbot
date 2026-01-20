@@ -555,9 +555,24 @@ async function streamResponse(page, initialCount) {
         const lines = md.split('\n');
         const out = [];
         let inFence = false;
+        let inTable = false;
+        let tablePipeCount = 0;
+
+        function isTableSepLine(value) {
+            return /^\s*\|?[-:\s]+\|[-:\s|]*$/.test(value);
+        }
+        function countPipes(value) {
+            let count = 0;
+            for (let i = 0; i < value.length; i++) {
+                if (value[i] === '|' && value[i - 1] !== '\\') count++;
+            }
+            return count;
+        }
+
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
             const trimmed = line.trim();
+
             if (trimmed.startsWith('```')) {
                 inFence = !inFence;
                 out.push(line);
@@ -567,24 +582,49 @@ async function streamResponse(page, initialCount) {
                 out.push(line);
                 continue;
             }
+
             const next = lines[i + 1] || '';
-            const isTableRow = line.includes('|') && /^\s*\|?[-:\s]+\|[-:\s|]*$/.test(next);
-            const isTableSep = /^\s*\|?[-:\s]+\|[-:\s|]*$/.test(line);
-            if (isTableRow || isTableSep) {
+            const pipeCount = countPipes(line);
+
+            if (!inTable && pipeCount >= 2 && isTableSepLine(next)) {
+                inTable = true;
+                tablePipeCount = pipeCount;
                 out.push(line);
                 continue;
             }
+
+            if (inTable) {
+                if (trimmed === '') {
+                    out.push('');
+                    inTable = false;
+                    tablePipeCount = 0;
+                    continue;
+                }
+                if (isTableSepLine(line) || pipeCount >= tablePipeCount) {
+                    out.push(line);
+                    continue;
+                }
+                if (out.length) {
+                    out[out.length - 1] = `${out[out.length - 1]} ${trimmed}`;
+                } else {
+                    out.push(trimmed);
+                }
+                continue;
+            }
+
             if (trimmed === '') {
                 out.push('');
                 continue;
             }
-            const isBlockStart = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+\.\s|---$|___$|\*\*\*$)/.test(line);
+
+            const isBlockStart = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+\.\s|---$|___$|\*\*\*$|\s*•\s)/.test(line);
             if (isBlockStart) {
                 out.push(line);
                 continue;
             }
+
             const prev = out[out.length - 1] || '';
-            const prevBlock = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+\.\s|---$|___$|\*\*\*$)/.test(prev);
+            const prevBlock = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+\.\s|---$|___$|\*\*\*$|\s*•\s)/.test(prev);
             if (out.length && prev !== '' && !prevBlock && !prev.trim().endsWith('  ')) {
                 out[out.length - 1] = `${prev} ${trimmed}`;
             } else {

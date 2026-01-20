@@ -1556,8 +1556,49 @@ async function startChatInterface(page, browser) {
       }
 
       if (input) {
+        let finalPrompt = input;
+        
+        // Handle @include expansion
+        const includeRegex = /@include\s+("([^"]+)"|'([^']+)'|([^\s]+))/g;
+        let match;
+        let expansionError = false;
+
+        // Collect replacements first to avoid issues with regex index when modifying string
+        const replacements = [];
+        
+        while ((match = includeRegex.exec(input)) !== null) {
+            const fullMatch = match[0];
+            const filePath = match[2] || match[3] || match[4];
+            
+            try {
+                const absolutePath = path.resolve(process.cwd(), filePath);
+                if (fs.existsSync(absolutePath)) {
+                    const content = fs.readFileSync(absolutePath, 'utf8');
+                    replacements.push({ 
+                        original: fullMatch, 
+                        content: `\n\n--- Start of ${path.basename(filePath)} ---\n${content}\n--- End of ${path.basename(filePath)} ---\n` 
+                    });
+                } else {
+                    console.log(chalk.red(`Error: File not found: ${filePath}`));
+                    expansionError = true;
+                }
+            } catch (err) {
+                console.log(chalk.red(`Error reading file ${filePath}: ${err.message}`));
+                expansionError = true;
+            }
+        }
+
+        if (expansionError) {
+             rl.prompt();
+             return;
+        }
+
+        for (const rep of replacements) {
+            finalPrompt = finalPrompt.replace(rep.original, rep.content);
+        }
+
         rl.pause(); // Stop input while processing
-        await sendPromptToGemini(page, input);
+        await sendPromptToGemini(page, finalPrompt);
         rl.resume();
       }
       rl.prompt();
@@ -1607,8 +1648,30 @@ async function sendPromptToGemini(page, promptText) {
         return (scopedCandidates.length ? scopedCandidates : allCandidates).length;
     }, RESPONSE_SELECTOR, RESPONSE_CONTAINER_SELECTOR);
     
-    // Type and send
-    await page.keyboard.type(promptText);
+    // Send prompt
+    if (promptText.length > 200) {
+        // Use clipboard paste for large text
+        await page.evaluate((text) => {
+            const data = new DataTransfer();
+            data.setData('text/plain', text);
+            const event = new ClipboardEvent('paste', {
+                clipboardData: data,
+                bubbles: true,
+                cancelable: true
+            });
+            document.activeElement.dispatchEvent(event);
+            
+            // Fallback if paste event doesn't trigger native insertion (often blocked)
+            // But for Gemini's rich text editor, we might need execCommand
+            if (document.activeElement.innerText === '') {
+                 document.execCommand('insertText', false, text);
+            }
+        }, promptText);
+    } else {
+        await page.keyboard.type(promptText);
+    }
+    
+    await new Promise(r => setTimeout(r, 300)); // Small delay for UI update
     await page.keyboard.press('Enter');
 
     await waitForResponseAndRender(page, initialCount);

@@ -33,7 +33,7 @@ A powerful command-line interface for interacting with Google's Gemini (formerly
 Use the provided helper script to launch the chatbot. This handles the browser process isolation and ensures the window stays open.
 
 ```bash
-./run-chatbot.sh
+./chatbot
 ```
 
 **Note:** This will launch a Chromium window. You need to log in to your Google account in this window the first time you run it.
@@ -46,12 +46,12 @@ Use the provided helper script to launch the chatbot. This handles the browser p
 
 ## Configuration
 
-- The script uses port `9233` for remote debugging by default. You can change this in `run-chatbot.sh`.
+- The script uses port `9233` for remote debugging by default. You can change this in `chatbot`.
 - Session data is stored in `.browser-session`.
 
 ## Troubleshooting
 
-- **Browser closes on Ctrl+C:** The script now uses `setsid` to detach the browser. Ensure you are using `./run-chatbot.sh`.
+- **Browser closes on Ctrl+C:** The script now uses `setsid` to detach the browser. Ensure you are using `./chatbot`.
 - **Text stops appearing when minimized:** We have enabled background flags to prevent throttling. If this persists, try keeping the window partially visible or on a separate workspace.
 
 ## License

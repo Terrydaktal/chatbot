@@ -946,6 +946,9 @@ async function fetchConversationMessages(page) {
 
 async function selectChatFromList(chats) {
   if (!process.stdin.isTTY) return null;
+  // Ensure stdin is flowing (rl.close() often pauses it)
+  process.stdin.resume();
+
   return new Promise((resolve) => {
     const stdin = process.stdin;
     readline.emitKeypressEvents(stdin);
@@ -1276,70 +1279,76 @@ async function ensureFlashModel(page) {
 }
 
 async function startChatInterface(page, browser) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: chalk.bold.green('\nYou > ')
-  });
+  const runLoop = () => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+      prompt: chalk.bold.green('\nYou > ')
+    });
 
-  rl.prompt();
+    rl.prompt();
 
-  rl.on('line', async (line) => {
-    const input = line.trim();
-    if (input.toLowerCase() === 'exit' || input.toLowerCase() === 'quit') {
-      rl.close();
-      console.log(chalk.blue('Exiting CLI. Browser session remains open for reuse.'));
-      browser.disconnect();
-      process.exit(0);
-    }
+    rl.on('line', async (line) => {
+      const input = line.trim();
+      if (input.toLowerCase() === 'exit' || input.toLowerCase() === 'quit') {
+        rl.close();
+        console.log(chalk.blue('Exiting CLI. Browser session remains open for reuse.'));
+        browser.disconnect();
+        process.exit(0);
+      }
 
-    if (input.toLowerCase() === '/chats') {
-      rl.pause();
-      const chats = await fetchRecentChats(page);
-      if (!chats.length) {
-        console.log(chalk.yellow('No recent chats found in the sidebar.'));
-      } else {
-        const selected = await selectChatFromList(chats);
-        if (selected) {
-          const targetUrl = selected.href
-            ? new URL(selected.href, GEMINI_URL).toString()
-            : GEMINI_URL;
-          console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
-          await page.goto(targetUrl);
-          await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
-          await applyVisibilityOverride(page);
-          await applyLifecycleOverrides(page);
+      if (input.toLowerCase() === '/chats') {
+        rl.close(); // Close RL to free up stdin for raw mode
+        
+        const chats = await fetchRecentChats(page);
+        if (!chats.length) {
+          console.log(chalk.yellow('No recent chats found in the sidebar.'));
+        } else {
+          const selected = await selectChatFromList(chats);
+          if (selected) {
+            const targetUrl = selected.href
+              ? new URL(selected.href, GEMINI_URL).toString()
+              : GEMINI_URL;
+            console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
+            await page.goto(targetUrl);
+            await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
+            await applyVisibilityOverride(page);
+            await applyLifecycleOverrides(page);
 
-          const history = await fetchConversationMessages(page);
-          if (!history.length) {
-            console.log(chalk.yellow('No messages found in this chat.'));
-          } else {
-            console.log(chalk.magenta('\nChat history:\n'));
-            for (const msg of history) {
-              if (msg.role === 'user') {
-                console.log(chalk.bold.green('You > ') + msg.text);
-              } else {
-                console.log(chalk.bold.cyan('Gemini > '));
-                const rendered = marked(normalizeMarkdown(msg.text || ''));
-                console.log(rendered.trimEnd());
+            const history = await fetchConversationMessages(page);
+            if (!history.length) {
+              console.log(chalk.yellow('No messages found in this chat.'));
+            } else {
+              console.log(chalk.magenta('\nChat history:\n'));
+              for (const msg of history) {
+                if (msg.role === 'user') {
+                  console.log(chalk.bold.green('You > ') + msg.text);
+                } else {
+                  console.log(chalk.bold.cyan('Gemini > '));
+                  const rendered = marked(normalizeMarkdown(msg.text || ''));
+                  console.log(rendered.trimEnd());
+                }
+                console.log('');
               }
-              console.log('');
             }
           }
         }
+        
+        // Restart loop
+        runLoop();
+        return;
       }
-      rl.resume();
-      rl.prompt();
-      return;
-    }
 
-    if (input) {
-      rl.pause(); // Stop input while processing
-      await sendPromptToGemini(page, input);
-      rl.resume();
-    }
-    rl.prompt();
-  });
+      if (input) {
+        rl.pause(); // Stop input while processing
+        await sendPromptToGemini(page, input);
+        rl.resume();
+      }
+      rl.prompt();
+    });
+  };
+
+  runLoop();
 }
 
 async function sendPromptToGemini(page, promptText) {

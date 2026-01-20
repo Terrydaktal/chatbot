@@ -559,8 +559,9 @@ async function streamResponse(page, initialCount) {
         }
 
         if (process.stdout.isTTY && cursorSaved) {
-            process.stdout.write('\x1b8'); // restore cursor
+            process.stdout.write('\x1b[u'); // restore cursor
             process.stdout.write('\x1b[J'); // clear to end of screen
+            cursorSaved = false;
         } else if (process.stdout.isTTY && streamedText.length > 0) {
             const lines = calculateRawLines(streamedText);
             for (let i = 0; i < lines; i++) {
@@ -600,7 +601,7 @@ async function streamResponse(page, initialCount) {
         
         // --- Direct Output ---
         if (process.stdout.isTTY && !cursorSaved) {
-            process.stdout.write('\x1b7'); // save cursor
+            process.stdout.write('\x1b[s'); // save cursor
             cursorSaved = true;
         }
         process.stdout.write(char);

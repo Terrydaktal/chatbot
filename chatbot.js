@@ -545,6 +545,18 @@ async function applyVisibilityOverride(page) {
         configurable: true,
       });
     } catch (e) {}
+    
+    // Override requestAnimationFrame to keep running even when backgrounded/minimized
+    try {
+        const target = window;
+        const raf = (callback) => setTimeout(() => callback(Date.now()), 1000 / 60);
+        const caf = (id) => clearTimeout(id);
+        
+        Object.defineProperty(target, 'requestAnimationFrame', { value: raf, configurable: true });
+        Object.defineProperty(target, 'webkitRequestAnimationFrame', { value: raf, configurable: true });
+        Object.defineProperty(target, 'cancelAnimationFrame', { value: caf, configurable: true });
+        Object.defineProperty(target, 'webkitCancelAnimationFrame', { value: caf, configurable: true });
+    } catch (e) {}
   };
 
   try {

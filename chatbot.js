@@ -615,6 +615,369 @@ async function waitForResponseAndRender(page, initialCount) {
   }
 }
 
+async function fetchRecentChats(page) {
+  try {
+    return await page.evaluate(() => {
+      const tooltipMap = new Map();
+      const tooltipContainer = document.querySelector('.cdk-describedby-message-container');
+      if (tooltipContainer) {
+        tooltipContainer.querySelectorAll('[id^="cdk-describedby-message"]').forEach(el => {
+          const text = (el.textContent || '').trim();
+          if (text) tooltipMap.set(el.id, text);
+        });
+      }
+
+      const navRoot = document.querySelector('side-navigation-v2') ||
+        document.querySelector('bard-side-navigation') ||
+        document.querySelector('nav') ||
+        document.body;
+
+      const links = Array.from(navRoot.querySelectorAll('a[href*="/app/"]'));
+      const items = [];
+      const seen = new Set();
+
+      const pickTitle = (el) => {
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (text) return text;
+        const aria = el.getAttribute('aria-label') || '';
+        if (aria.trim()) return aria.trim();
+        const title = el.getAttribute('title') || '';
+        if (title.trim()) return title.trim();
+        const describedBy = el.getAttribute('aria-describedby') || '';
+        const tooltip = tooltipMap.get(describedBy);
+        if (tooltip) return tooltip;
+        return '';
+      };
+
+      for (const link of links) {
+        const href = link.getAttribute('href') || link.href || '';
+        if (!href || !href.includes('/app/')) continue;
+        const title = pickTitle(link);
+        const key = href;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push({ title, href });
+      }
+
+      if (!items.length) {
+        const candidates = Array.from(navRoot.querySelectorAll('[aria-describedby], [data-test-id], [role="button"]'));
+        for (const el of candidates) {
+          const describedBy = el.getAttribute('aria-describedby') || '';
+          const title = pickTitle(el);
+          if (!title) continue;
+          const dataTestId = (el.getAttribute('data-test-id') || '').toLowerCase();
+          if (!dataTestId.includes('history') && !dataTestId.includes('conversation') && !describedBy) {
+            continue;
+          }
+          const href = el.getAttribute('href') || '';
+          const key = href || title;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          items.push({ title, href });
+        }
+      }
+
+      return items.slice(0, 30);
+    });
+  } catch (e) {
+    return [];
+  }
+}
+
+async function fetchConversationMessages(page) {
+  try {
+    return await page.evaluate(() => {
+      function domToMarkdown(node) {
+        if (!node) return '';
+        let md = '';
+        const listStack = [];
+        function append(text) { if (text) md += text; }
+        function trailingNewlines() {
+          const match = md.match(/\n*$/);
+          return match ? match[0].length : 0;
+        }
+        function ensureNewlines(count) {
+          const current = trailingNewlines();
+          if (current < count) md += '\n'.repeat(count - current);
+        }
+        function fenceFor(text) {
+          const matches = text.match(/`+/g) || [];
+          let max = 0;
+          for (const m of matches) max = Math.max(max, m.length);
+          return '`'.repeat(Math.max(3, max + 1));
+        }
+        function inlineFence(text) {
+          const matches = text.match(/`+/g) || [];
+          let max = 0;
+          for (const m of matches) max = Math.max(max, m.length);
+          return '`'.repeat(Math.max(1, max + 1));
+        }
+        function escapeTableCell(text) {
+          return (text || '').replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim();
+        }
+        function extractTable(table) {
+          const rows = [];
+          let headerCells = [];
+          const thead = table.querySelector('thead');
+          if (thead) {
+            const headerRow = thead.querySelector('tr');
+            if (headerRow) {
+              headerCells = Array.from(headerRow.children)
+                .filter(el => el.tagName && el.tagName.toLowerCase() === 'th')
+                .map(el => escapeTableCell(el.textContent));
+            }
+          }
+          const bodyRows = Array.from(table.querySelectorAll('tbody tr, tr'));
+          for (const row of bodyRows) {
+            const cells = Array.from(row.children)
+              .filter(el => el.tagName && (el.tagName.toLowerCase() === 'td' || el.tagName.toLowerCase() === 'th'))
+              .map(el => escapeTableCell(el.textContent));
+            if (cells.length) rows.push(cells);
+          }
+          if (!headerCells.length && rows.length) {
+            headerCells = rows.shift();
+          }
+          if (!headerCells.length) return;
+          const colCount = Math.max(headerCells.length, ...rows.map(r => r.length));
+          const pad = (arr) => {
+            while (arr.length < colCount) arr.push('');
+            return arr;
+          };
+          const header = pad([...headerCells]);
+          const sep = header.map(() => '---');
+          let out = `\n\n| ${header.join(' | ')} |\n| ${sep.join(' | ')} |\n`;
+          for (const row of rows) {
+            const cells = pad([...row]);
+            out += `| ${cells.join(' | ')} |\n`;
+          }
+          out += '\n';
+          append(out);
+        }
+        function extractCodeBlock(block) {
+          let lang = '';
+          const langEl = block.querySelector('.code-block-decoration span, .header-formatted span, .code-block-decoration');
+          if (langEl) lang = langEl.textContent.trim().toLowerCase();
+          const codeEl = block.querySelector('code[data-test-id="code-content"], pre code, code, pre');
+          let codeText = codeEl ? codeEl.textContent : '';
+          codeText = codeText.replace(/\n$/, '');
+          const fence = fenceFor(codeText);
+          append(`\n\n${fence}${lang ? ' ' + lang : ''}\n${codeText}\n${fence}\n\n`);
+        }
+        function renderChildren(el, inListItem) {
+          el.childNodes.forEach(child => render(child, inListItem));
+        }
+        function render(child, inListItem) {
+          if (child.nodeType === 3) {
+            append(child.textContent);
+            return;
+          }
+          if (child.nodeType !== 1) return;
+          const tag = child.tagName.toLowerCase();
+          const isCodeBlock = tag === 'code-block' || child.classList.contains('code-block');
+          if (isCodeBlock) { extractCodeBlock(child); return; }
+          if (tag === 'pre') { extractCodeBlock(child); return; }
+          if (tag === 'table') { extractTable(child); return; }
+          if (tag === 'br') { append('\n'); return; }
+          if (tag === 'hr') { ensureNewlines(2); append('---'); ensureNewlines(2); return; }
+          if (tag === 'p') {
+            if (inListItem) {
+              renderChildren(child, true);
+            } else {
+              ensureNewlines(2);
+              renderChildren(child, false);
+              ensureNewlines(2);
+            }
+            return;
+          }
+          if (tag === 'h1') { ensureNewlines(2); append('# '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h2') { ensureNewlines(2); append('## '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h3') { ensureNewlines(2); append('### '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h4') { ensureNewlines(2); append('#### '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h5') { ensureNewlines(2); append('##### '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h6') { ensureNewlines(2); append('###### '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'ul') {
+            listStack.push({ type: 'ul', index: 0 });
+            ensureNewlines(2);
+            renderChildren(child, false);
+            listStack.pop();
+            ensureNewlines(2);
+            return;
+          }
+          if (tag === 'ol') {
+            listStack.push({ type: 'ol', index: 0 });
+            ensureNewlines(2);
+            renderChildren(child, false);
+            listStack.pop();
+            ensureNewlines(2);
+            return;
+          }
+          if (tag === 'li') {
+            ensureNewlines(1);
+            const depth = Math.max(0, listStack.length - 1);
+            const indent = '  '.repeat(depth);
+            const top = listStack[listStack.length - 1];
+            let marker = '-';
+            if (top && top.type === 'ol') marker = `${++top.index}.`;
+            append(`${indent}${marker} `);
+            renderChildren(child, true);
+            return;
+          }
+          if (tag === 'blockquote') {
+            ensureNewlines(2);
+            const original = md;
+            md = '';
+            renderChildren(child, false);
+            const content = md.trim().split('\n');
+            md = original;
+            for (const line of content) append(`> ${line}\n`);
+            ensureNewlines(2);
+            return;
+          }
+          if (tag === 'strong' || tag === 'b') { append('**'); renderChildren(child, inListItem); append('**'); return; }
+          if (tag === 'em' || tag === 'i') { append('_'); renderChildren(child, inListItem); append('_'); return; }
+          if (tag === 'code') {
+            const text = child.textContent || '';
+            const fence = inlineFence(text);
+            append(`${fence}${text}${fence}`);
+            return;
+          }
+          if (tag === 'a') {
+            const href = child.getAttribute('href') || '';
+            append('[');
+            renderChildren(child, inListItem);
+            append(`](${href})`);
+            return;
+          }
+          renderChildren(child, inListItem);
+        }
+        renderChildren(node, false);
+        return md.trim();
+      }
+
+      const root = document.querySelector('chat-window-content') ||
+        document.querySelector('chat-window') ||
+        document.querySelector('main') ||
+        document.body;
+
+      const userSelectors = [
+        'user-message',
+        '[data-test-id="user-message"]',
+        '.user-message',
+        '.user-message-content',
+        '.query-text',
+        '.user-query'
+      ];
+      const userNodes = Array.from(root.querySelectorAll(userSelectors.join(',')));
+      const aiNodes = Array.from(root.querySelectorAll('response-container, model-response, .model-response-text, .message-content, .markdown'));
+
+      const items = [];
+      const seen = new Set();
+
+      for (const node of userNodes) {
+        const text = (node.innerText || node.textContent || '').trim();
+        if (!text) continue;
+        if (seen.has(node)) continue;
+        seen.add(node);
+        items.push({ role: 'user', text, node });
+      }
+
+      for (const node of aiNodes) {
+        let text = domToMarkdown(node);
+        if (!text || !text.trim()) {
+          text = (node.innerText || node.textContent || '').trim();
+        }
+        if (!text) continue;
+        if (seen.has(node)) continue;
+        seen.add(node);
+        items.push({ role: 'ai', text, node });
+      }
+
+      items.sort((a, b) => {
+        if (a.node === b.node) return 0;
+        const pos = a.node.compareDocumentPosition(b.node);
+        if (pos & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+        if (pos & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+        return 0;
+      });
+
+      return items.map(({ role, text }) => ({ role, text }));
+    });
+  } catch (e) {
+    return [];
+  }
+}
+
+async function selectChatFromList(chats) {
+  if (!process.stdin.isTTY) return null;
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    readline.emitKeypressEvents(stdin);
+    const wasRaw = stdin.isRaw;
+    if (!wasRaw) stdin.setRawMode(true);
+
+    let index = 0;
+    let renderedLines = 0;
+
+    const render = () => {
+      if (renderedLines > 0) {
+        process.stdout.write(`\x1b[${renderedLines}A`);
+        process.stdout.write('\r');
+        process.stdout.write('\x1b[J');
+      }
+      console.log(chalk.cyan('\nSelect a chat (↑/↓, Enter to open, Esc to cancel):'));
+      const maxToShow = Math.min(chats.length, 12);
+      const start = Math.max(0, Math.min(index - Math.floor(maxToShow / 2), chats.length - maxToShow));
+      const end = start + maxToShow;
+      for (let i = start; i < end; i++) {
+        const item = chats[i];
+        const label = item.title || '(untitled)';
+        const line = ` ${i === index ? '>' : ' '} ${label}`;
+        if (i === index) {
+          console.log(chalk.inverse(line));
+        } else {
+          console.log(line);
+        }
+      }
+      renderedLines = 1 + maxToShow;
+    };
+
+    const cleanup = () => {
+      if (!wasRaw) stdin.setRawMode(false);
+      stdin.removeListener('keypress', onKeypress);
+      process.stdout.write('\x1b[?25h');
+    };
+
+    const onKeypress = (_str, key) => {
+      if (!key) return;
+      if (key.name === 'up') {
+        index = (index - 1 + chats.length) % chats.length;
+        render();
+        return;
+      }
+      if (key.name === 'down') {
+        index = (index + 1) % chats.length;
+        render();
+        return;
+      }
+      if (key.name === 'return') {
+        cleanup();
+        process.stdout.write('\n');
+        resolve(chats[index]);
+        return;
+      }
+      if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        cleanup();
+        process.stdout.write('\n');
+        resolve(null);
+      }
+    };
+
+    process.stdout.write('\x1b[?25l');
+    stdin.on('keypress', onKeypress);
+    render();
+  });
+}
+
 // Configuration
 const CHROMIUM_PATH = '/bin/chromium'; // Found via `which chromium`
 const USER_DATA_DIR = '/home/lewis/.config/chromium';
@@ -891,6 +1254,46 @@ async function startChatInterface(page, browser) {
       console.log(chalk.blue('Exiting CLI. Browser session remains open for reuse.'));
       browser.disconnect();
       process.exit(0);
+    }
+
+    if (input.toLowerCase() === '/chats') {
+      rl.pause();
+      const chats = await fetchRecentChats(page);
+      if (!chats.length) {
+        console.log(chalk.yellow('No recent chats found in the sidebar.'));
+      } else {
+        const selected = await selectChatFromList(chats);
+        if (selected) {
+          const targetUrl = selected.href
+            ? new URL(selected.href, GEMINI_URL).toString()
+            : GEMINI_URL;
+          console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
+          await page.goto(targetUrl);
+          await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
+          await applyVisibilityOverride(page);
+          await applyLifecycleOverrides(page);
+
+          const history = await fetchConversationMessages(page);
+          if (!history.length) {
+            console.log(chalk.yellow('No messages found in this chat.'));
+          } else {
+            console.log(chalk.magenta('\nChat history:\n'));
+            for (const msg of history) {
+              if (msg.role === 'user') {
+                console.log(chalk.bold.green('You > ') + msg.text);
+              } else {
+                console.log(chalk.bold.cyan('Gemini > '));
+                const rendered = marked(normalizeMarkdown(msg.text || ''));
+                console.log(rendered.trimEnd());
+              }
+              console.log('');
+            }
+          }
+        }
+      }
+      rl.resume();
+      rl.prompt();
+      return;
     }
 
     if (input) {

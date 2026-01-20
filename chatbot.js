@@ -515,6 +515,15 @@ async function applyVisibilityOverride(page) {
     define(document, 'mozVisibilityState', 'visible');
     define(document, 'msHidden', false);
     define(document, 'msVisibilityState', 'visible');
+    try {
+      document.hasFocus = () => true;
+    } catch (e) {}
+    try {
+      Object.defineProperty(Document.prototype, 'hasFocus', {
+        value: () => true,
+        configurable: true,
+      });
+    } catch (e) {}
   };
 
   try {
@@ -545,23 +554,37 @@ async function applyLifecycleOverrides(page) {
 
 async function waitForResponseAndRender(page, initialCount) {
   const stopTyping = startTypingAnimation();
+  const keepAlive = setInterval(() => {
+    void applyLifecycleOverrides(page);
+    void page.evaluate(() => {
+      try {
+        document.dispatchEvent(new Event('visibilitychange'));
+        window.dispatchEvent(new Event('focus'));
+        window.dispatchEvent(new Event('pageshow'));
+      } catch (e) {}
+    });
+  }, 1000);
 
-  await page.waitForFunction(
-    (initialCount, responseSelector, responseContainerSelector) => {
-      const allCandidates = Array.from(document.querySelectorAll(responseSelector));
-      const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
-      const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
-      if (candidates.length <= initialCount) return false;
-      const latest = candidates[candidates.length - 1];
-      const container = latest ? latest.closest(responseContainerSelector) : null;
-      const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
-      return !!copyBtn;
-    },
-    { timeout: 300000 },
-    initialCount,
-    RESPONSE_SELECTOR,
-    RESPONSE_CONTAINER_SELECTOR
-  );
+  try {
+    await page.waitForFunction(
+      (initialCount, responseSelector, responseContainerSelector) => {
+        const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+        const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
+        const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
+        if (candidates.length <= initialCount) return false;
+        const latest = candidates[candidates.length - 1];
+        const container = latest ? latest.closest(responseContainerSelector) : null;
+        const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
+        return !!copyBtn;
+      },
+      { timeout: 300000 },
+      initialCount,
+      RESPONSE_SELECTOR,
+      RESPONSE_CONTAINER_SELECTOR
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
 
   stopTyping();
 

@@ -19,9 +19,13 @@ const highlight = require('highlight.js');
 // Configure Markdown Renderer with Highlighting
 const OUTPUT_WIDTH = 88;
 const TABLE_COL_WIDTH = Math.max(12, Math.floor((OUTPUT_WIDTH - 10) / 3));
+const TYPING_FRAMES = ['●○○○', '○●○○', '○○●○', '○○○●'];
+const TYPING_INTERVAL_MS = 120;
+const LINE_STREAM_DELAY_MS = 20;
+const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
 const renderer = new TerminalRenderer({
   width: OUTPUT_WIDTH,
-  reflowText: true,
+  reflowText: false,
   showSectionPrefix: false,
   tab: 4, // More indentation
   heading: chalk.bold.blue, // Blue bold headers
@@ -132,6 +136,215 @@ marked.setOptions({
     return highlight.highlightAuto(code, commonLanguages.length ? commonLanguages : undefined).value;
   }
 });
+
+function stripAnsi(value) {
+  return value.replace(ANSI_REGEX, '');
+}
+
+function startTypingAnimation() {
+  let frameIndex = 0;
+  const cols = process.stdout.columns || OUTPUT_WIDTH;
+  process.stdout.write('\n');
+
+  const render = () => {
+    const frame = TYPING_FRAMES[frameIndex % TYPING_FRAMES.length];
+    const text = chalk.yellow(`Gemini is typing ${frame}`);
+    const pad = Math.max(0, cols - stripAnsi(text).length);
+    process.stdout.write(`\r${text}${' '.repeat(pad)}`);
+    frameIndex += 1;
+  };
+
+  render();
+  const interval = setInterval(render, TYPING_INTERVAL_MS);
+
+  return () => {
+    clearInterval(interval);
+    process.stdout.write(`\r${' '.repeat(cols)}\r`);
+  };
+}
+
+function normalizeMarkdown(md) {
+  const lines = md.split('\n');
+  const out = [];
+  let inFence = false;
+  let inTable = false;
+  let tablePipeCount = 0;
+
+  function isTableSepLine(value) {
+    return /^\s*\|?[-:\s]+\|[-:\s|]*$/.test(value);
+  }
+  function countPipes(value) {
+    let count = 0;
+    for (let i = 0; i < value.length; i++) {
+      if (value[i] === '|' && value[i - 1] !== '\\') count++;
+    }
+    return count;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (trimmed.startsWith('```')) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+
+    const next = lines[i + 1] || '';
+    const pipeCount = countPipes(line);
+
+    if (!inTable && pipeCount >= 2 && isTableSepLine(next)) {
+      inTable = true;
+      tablePipeCount = pipeCount;
+      out.push(line);
+      continue;
+    }
+
+    if (inTable) {
+      if (trimmed === '') {
+        out.push('');
+        inTable = false;
+        tablePipeCount = 0;
+        continue;
+      }
+      if (isTableSepLine(line) || pipeCount >= tablePipeCount) {
+        out.push(line);
+        continue;
+      }
+      if (out.length) {
+        out[out.length - 1] = `${out[out.length - 1]} ${trimmed}`;
+      } else {
+        out.push(trimmed);
+      }
+      continue;
+    }
+
+    if (trimmed === '') {
+      out.push('');
+      continue;
+    }
+
+    const isBlockStart = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+\.\s|---$|___$|\*\*\*$|\s*•\s)/.test(line);
+    if (isBlockStart) {
+      out.push(line);
+      continue;
+    }
+
+    const prev = out[out.length - 1] || '';
+    const prevBlock = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+\.\s|---$|___$|\*\*\*$|\s*•\s)/.test(prev);
+    if (out.length && prev !== '' && !prevBlock && !prev.trim().endsWith('  ')) {
+      out[out.length - 1] = `${prev} ${trimmed}`;
+    } else {
+      out.push(trimmed);
+    }
+  }
+  return out.join('\n');
+}
+
+async function fetchCopyMarkdown(page) {
+  try {
+    return await page.evaluate((responseSelector, responseContainerSelector) => {
+      const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+      const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
+      const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
+      const latest = candidates[candidates.length - 1];
+      const container = latest ? latest.closest(responseContainerSelector) : null;
+      const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
+      if (!copyBtn) return null;
+
+      let captured = null;
+      const onCopy = (e) => {
+        try {
+          captured = e.clipboardData.getData('text/plain');
+        } catch (err) {}
+        e.preventDefault();
+      };
+      document.addEventListener('copy', onCopy);
+
+      let originalWriteText = null;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        originalWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+        navigator.clipboard.writeText = async (text) => {
+          captured = text;
+          return Promise.resolve();
+        };
+      }
+
+      const originalExecCommand = document.execCommand;
+      document.execCommand = function () { return true; };
+
+      copyBtn.click();
+
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          document.removeEventListener('copy', onCopy);
+          if (originalWriteText) {
+            navigator.clipboard.writeText = originalWriteText;
+          }
+          document.execCommand = originalExecCommand;
+          resolve(captured);
+        }, 50);
+      });
+    }, RESPONSE_SELECTOR, RESPONSE_CONTAINER_SELECTOR);
+  } catch (err) {
+    return null;
+  }
+}
+
+async function waitForResponseAndRender(page, initialCount) {
+  const stopTyping = startTypingAnimation();
+
+  await page.waitForFunction(
+    (initialCount, responseSelector, responseContainerSelector) => {
+      const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+      const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
+      const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
+      if (candidates.length <= initialCount) return false;
+      const latest = candidates[candidates.length - 1];
+      const container = latest ? latest.closest(responseContainerSelector) : null;
+      const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
+      return !!copyBtn;
+    },
+    { timeout: 300000 },
+    initialCount,
+    RESPONSE_SELECTOR,
+    RESPONSE_CONTAINER_SELECTOR
+  );
+
+  stopTyping();
+
+  let finalText = await fetchCopyMarkdown(page);
+  if (!finalText || !finalText.trim()) {
+    finalText = await page.evaluate((responseSelector, responseContainerSelector) => {
+      const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+      const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
+      const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
+      const latest = candidates[candidates.length - 1];
+      return latest ? latest.innerText || latest.textContent || '' : '';
+    }, RESPONSE_SELECTOR, RESPONSE_CONTAINER_SELECTOR);
+  }
+
+  finalText = normalizeMarkdown(finalText || '');
+  const rendered = marked(finalText);
+  const lines = rendered.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const suffix = i < lines.length - 1 ? '\n' : '';
+    process.stdout.write(`${line}${suffix}`);
+    if (LINE_STREAM_DELAY_MS > 0) {
+      await new Promise(resolve => setTimeout(resolve, LINE_STREAM_DELAY_MS));
+    }
+  }
+  if (!rendered.endsWith('\n')) {
+    process.stdout.write('\n');
+  }
+}
 
 // Configuration
 const CHROMIUM_PATH = '/bin/chromium'; // Found via `which chromium`
@@ -460,9 +673,7 @@ async function sendPromptToGemini(page, promptText) {
     await page.keyboard.type(promptText);
     await page.keyboard.press('Enter');
 
-    console.log(chalk.yellow('\nGemini is typing...'));
-    
-    await streamResponse(page, initialCount);
+    await waitForResponseAndRender(page, initialCount);
 
   } catch (error) {
     console.error(chalk.red('Error interacting with page:'), error.message);

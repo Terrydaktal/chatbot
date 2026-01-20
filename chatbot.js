@@ -41,6 +41,13 @@ const renderer = new TerminalRenderer({
   }
 });
 
+renderer.hr = function () {
+  // Use ANSI escape codes to disable auto-wrap for the separator line.
+  // This effectively truncates the line at the terminal width instead of wrapping it.
+  const line = '-'.repeat(1000);
+  return `\u001b[?7l${chalk.gray(line)}\u001b[?7h\n`;
+};
+
 let activeStopTyping = null;
 let abortRequested = false;
 process.on('SIGINT', () => {

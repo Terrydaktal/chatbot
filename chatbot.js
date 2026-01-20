@@ -1326,12 +1326,32 @@ async function startChatInterface(page, browser) {
               ? new URL(selected.href, GEMINI_URL).toString()
               : GEMINI_URL;
             console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
-            await page.goto(targetUrl);
+            console.log(chalk.dim(`Navigating to: ${targetUrl}`)); // Debug log
+
+            await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+            
+            // Wait for input first (basic app load)
             await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
+            
+            // Try to wait for any message content to appear, to avoid premature "No messages"
+            try {
+                await page.waitForSelector('user-message, response-container, .message-content', { timeout: 5000 });
+            } catch (e) {
+                // It's okay if this times out (e.g. empty new chat), we'll check manually next
+            }
+
             await applyVisibilityOverride(page);
             await applyLifecycleOverrides(page);
 
-            const history = await fetchConversationMessages(page);
+            let history = await fetchConversationMessages(page);
+            
+            // Retry once if empty, in case of slow hydration
+            if (!history.length) {
+                console.log(chalk.dim('Waiting for messages to render...'));
+                await new Promise(r => setTimeout(r, 3000));
+                history = await fetchConversationMessages(page);
+            }
+
             if (!history.length) {
               console.log(chalk.yellow('No messages found in this chat.'));
             } else {

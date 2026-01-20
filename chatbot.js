@@ -383,6 +383,7 @@ async function streamResponse(page, initialCount) {
     let isTyping = false;
     let fullText = '';
     let responseCompleteTriggered = false;
+    let streamedText = '';
 
     // ANSI Strip Regex for accurate line counting
     const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
@@ -408,13 +409,21 @@ async function streamResponse(page, initialCount) {
             isTyping = false;
             // Check if we are done
             if (responseCompleteTriggered) {
-                // Done! Just print a newline separation
-                process.stdout.write('\n\n'); 
-                
-                // Render beautiful Markdown
+                if (process.stdout.isTTY && streamedText.length > 0) {
+                    const lines = calculateRawLines(streamedText);
+                    for (let i = 0; i < lines; i++) {
+                        process.stdout.write('\x1b[2K');
+                        if (i < lines - 1) process.stdout.write('\x1b[1A');
+                    }
+                    process.stdout.write('\r');
+                } else {
+                    process.stdout.write('\n');
+                }
+
+                // Render formatted Markdown once
                 try {
                     console.log(marked(fullText));
-                } catch(e) {
+                } catch (e) {
                     console.log(fullText);
                 }
                 resolveStream();
@@ -425,6 +434,7 @@ async function streamResponse(page, initialCount) {
         isTyping = true;
         const char = charQueue.shift();
         fullText += char;
+        streamedText += char;
         
         // --- Direct Output ---
         process.stdout.write(char);

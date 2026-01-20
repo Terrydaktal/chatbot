@@ -479,7 +479,8 @@ async function streamResponse(page, initialCount) {
     let responseCompleteTriggered = false;
     let streamedText = '';
     let finalizeStarted = false;
-    let cursorSaved = false;
+    let streamCol = 0;
+    let streamLines = 1;
 
     // ANSI Strip Regex for accurate line counting
     const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
@@ -558,17 +559,12 @@ async function streamResponse(page, initialCount) {
             fullText = copied;
         }
 
-        if (process.stdout.isTTY && cursorSaved) {
-            process.stdout.write('\x1b[u'); // restore cursor
-            process.stdout.write('\x1b[J'); // clear to end of screen
-            cursorSaved = false;
-        } else if (process.stdout.isTTY && streamedText.length > 0) {
-            const lines = calculateRawLines(streamedText);
-            for (let i = 0; i < lines; i++) {
-                process.stdout.write('\x1b[2K');
-                if (i < lines - 1) process.stdout.write('\x1b[1A');
+        if (process.stdout.isTTY && streamLines > 0) {
+            if (streamLines > 1) {
+                process.stdout.write(`\x1b[${streamLines - 1}A`);
             }
             process.stdout.write('\r');
+            process.stdout.write('\x1b[J'); // clear to end of screen
         } else {
             process.stdout.write('\n');
         }
@@ -600,11 +596,19 @@ async function streamResponse(page, initialCount) {
         streamedText += char;
         
         // --- Direct Output ---
-        if (process.stdout.isTTY && !cursorSaved) {
-            process.stdout.write('\x1b[s'); // save cursor
-            cursorSaved = true;
+        if (char === '\n') {
+            process.stdout.write('\n');
+            streamLines += 1;
+            streamCol = 0;
+        } else {
+            if (streamCol >= OUTPUT_WIDTH - 1) {
+                process.stdout.write('\n');
+                streamLines += 1;
+                streamCol = 0;
+            }
+            process.stdout.write(char);
+            streamCol += 1;
         }
-        process.stdout.write(char);
 
         // Speed control
         let delay = 2; 

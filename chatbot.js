@@ -45,10 +45,85 @@ renderer.text = function (text) {
 marked.setOptions({
   renderer,
   highlight: (code, lang) => {
-    if (highlight.getLanguage(lang)) {
-      return highlight.highlight(code, { language: lang }).value;
+    const rawLang = (lang || '').toString().trim().toLowerCase();
+    const aliasMap = {
+      'bash': 'bash',
+      'sh': 'bash',
+      'shell': 'bash',
+      'zsh': 'bash',
+      'ksh': 'bash',
+      'fish': 'bash',
+      'console': 'bash',
+      'terminal': 'bash',
+      'cmd': 'dos',
+      'bat': 'dos',
+      'batch': 'dos',
+      'powershell': 'powershell',
+      'ps': 'powershell',
+      'ps1': 'powershell',
+      'javascript': 'javascript',
+      'js': 'javascript',
+      'node': 'javascript',
+      'typescript': 'typescript',
+      'ts': 'typescript',
+      'json': 'json',
+      'yaml': 'yaml',
+      'yml': 'yaml',
+      'html': 'xml',
+      'xml': 'xml',
+      'svg': 'xml',
+      'css': 'css',
+      'scss': 'scss',
+      'less': 'less',
+      'python': 'python',
+      'py': 'python',
+      'ruby': 'ruby',
+      'rb': 'ruby',
+      'go': 'go',
+      'golang': 'go',
+      'rust': 'rust',
+      'rs': 'rust',
+      'java': 'java',
+      'kotlin': 'kotlin',
+      'kt': 'kotlin',
+      'c': 'c',
+      'h': 'c',
+      'cpp': 'cpp',
+      'c++': 'cpp',
+      'hpp': 'cpp',
+      'cc': 'cpp',
+      'csharp': 'csharp',
+      'cs': 'csharp',
+      'fsharp': 'fsharp',
+      'fs': 'fsharp',
+      'php': 'php',
+      'sql': 'sql',
+      'sqlite': 'sql',
+      'postgres': 'pgsql',
+      'postgresql': 'pgsql',
+      'mysql': 'sql',
+      'md': 'markdown',
+      'markdown': 'markdown',
+      'dockerfile': 'dockerfile',
+      'makefile': 'makefile',
+      'ini': 'ini',
+      'toml': 'toml',
+      'diff': 'diff',
+      'git': 'diff'
+    };
+    const normalized = aliasMap[rawLang] || rawLang;
+    if (normalized && highlight.getLanguage(normalized)) {
+      return highlight.highlight(code, { language: normalized }).value;
     }
-    return highlight.highlightAuto(code).value;
+    const commonLanguages = [
+      'bash', 'dos', 'powershell',
+      'javascript', 'typescript', 'json',
+      'python', 'go', 'rust', 'java', 'kotlin',
+      'cpp', 'c', 'csharp',
+      'html', 'xml', 'css', 'scss',
+      'sql', 'yaml', 'markdown'
+    ].filter((name) => highlight.getLanguage(name));
+    return highlight.highlightAuto(code, commonLanguages.length ? commonLanguages : undefined).value;
   }
 });
 

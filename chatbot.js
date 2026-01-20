@@ -25,7 +25,7 @@ marked.setOptions({
     tab: 4, // More indentation
     heading: chalk.bold.blue, // Blue bold headers
     firstHeading: chalk.bold.blue.underline,
-    strong: chalk.bold.white,
+    strong: chalk.hex('#C8A2C8').bold,
     em: chalk.italic,
     blockquote: chalk.gray.italic,
     code: chalk.yellow, // Inline code color
@@ -490,6 +490,47 @@ async function streamResponse(page, initialCount) {
                 for (const m of matches) max = Math.max(max, m.length);
                 return '`'.repeat(Math.max(1, max + 1));
             }
+            function escapeTableCell(text) {
+                return (text || '').replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim();
+            }
+            function extractTable(table) {
+                const rows = [];
+                let headerCells = [];
+                const thead = table.querySelector('thead');
+                if (thead) {
+                    const headerRow = thead.querySelector('tr');
+                    if (headerRow) {
+                        headerCells = Array.from(headerRow.children)
+                            .filter(el => el.tagName && el.tagName.toLowerCase() === 'th')
+                            .map(el => escapeTableCell(el.textContent));
+                    }
+                }
+                const bodyRows = Array.from(table.querySelectorAll('tbody tr, tr'));
+                for (const row of bodyRows) {
+                    const cells = Array.from(row.children)
+                        .filter(el => el.tagName && (el.tagName.toLowerCase() === 'td' || el.tagName.toLowerCase() === 'th'))
+                        .map(el => escapeTableCell(el.textContent));
+                    if (cells.length) rows.push(cells);
+                }
+                if (!headerCells.length && rows.length) {
+                    headerCells = rows.shift();
+                }
+                if (!headerCells.length) return;
+                const colCount = Math.max(headerCells.length, ...rows.map(r => r.length));
+                const pad = (arr) => {
+                    while (arr.length < colCount) arr.push('');
+                    return arr;
+                };
+                const header = pad([...headerCells]);
+                const sep = header.map(() => '---');
+                let out = `\n\n| ${header.join(' | ')} |\n| ${sep.join(' | ')} |\n`;
+                for (const row of rows) {
+                    const cells = pad([...row]);
+                    out += `| ${cells.join(' | ')} |\n`;
+                }
+                out += '\n';
+                append(out);
+            }
             function extractCodeBlock(block) {
                 let lang = '';
                 const langEl = block.querySelector('.code-block-decoration span, .header-formatted span, .code-block-decoration');
@@ -517,6 +558,10 @@ async function streamResponse(page, initialCount) {
                 }
                 if (tag === 'pre') {
                     extractCodeBlock(child);
+                    return;
+                }
+                if (tag === 'table') {
+                    extractTable(child);
                     return;
                 }
                 if (tag === 'br') { append('\n'); return; }

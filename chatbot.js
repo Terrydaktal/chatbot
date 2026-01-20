@@ -41,6 +41,19 @@ const renderer = new TerminalRenderer({
   }
 });
 
+let activeStopTyping = null;
+let abortRequested = false;
+process.on('SIGINT', () => {
+  if (abortRequested) process.exit(130);
+  abortRequested = true;
+  if (activeStopTyping) {
+    activeStopTyping();
+    activeStopTyping = null;
+  }
+  console.log(chalk.yellow('\nInterrupted. Exiting.'));
+  process.exit(130);
+});
+
 // Ensure inline tokens (like **bold**) are parsed inside text nodes
 renderer.text = function (text) {
   if (typeof text === 'object') {
@@ -554,6 +567,7 @@ async function applyLifecycleOverrides(page) {
 
 async function waitForResponseAndRender(page, initialCount) {
   const stopTyping = startTypingAnimation();
+  activeStopTyping = stopTyping;
   const keepAlive = setInterval(() => {
     void applyLifecycleOverrides(page);
     void page.evaluate(() => {
@@ -566,27 +580,46 @@ async function waitForResponseAndRender(page, initialCount) {
   }, 1000);
 
   try {
-    await page.waitForFunction(
-      (initialCount, responseSelector, responseContainerSelector) => {
+    const start = Date.now();
+    let lastLength = 0;
+    let stableCount = 0;
+
+    while (true) {
+      if (abortRequested) break;
+      const state = await page.evaluate((initialCount, responseSelector, responseContainerSelector) => {
         const allCandidates = Array.from(document.querySelectorAll(responseSelector));
         const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
         const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
-        if (candidates.length <= initialCount) return false;
+        if (candidates.length <= initialCount) {
+          return { hasCopy: false, textLength: 0 };
+        }
         const latest = candidates[candidates.length - 1];
         const container = latest ? latest.closest(responseContainerSelector) : null;
         const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
-        return !!copyBtn;
-      },
-      { timeout: 300000 },
-      initialCount,
-      RESPONSE_SELECTOR,
-      RESPONSE_CONTAINER_SELECTOR
-    );
+        const text = latest ? (latest.innerText || '') : '';
+        return { hasCopy: !!copyBtn, textLength: text.length };
+      }, initialCount, RESPONSE_SELECTOR, RESPONSE_CONTAINER_SELECTOR);
+
+      if (state.hasCopy) break;
+      if (state.textLength > 0) {
+        if (state.textLength === lastLength) {
+          stableCount += 1;
+        } else {
+          stableCount = 0;
+          lastLength = state.textLength;
+        }
+        if (stableCount >= 6) break;
+      }
+
+      if (Date.now() - start > 300000) break;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
   } finally {
     clearInterval(keepAlive);
   }
 
   stopTyping();
+  activeStopTyping = null;
 
   let finalText = await fetchCopyMarkdown(page);
   if (!finalText || !finalText.trim()) {

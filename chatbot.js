@@ -479,6 +479,7 @@ async function streamResponse(page, initialCount) {
     let responseCompleteTriggered = false;
     let streamedText = '';
     let finalizeStarted = false;
+    let cursorSaved = false;
 
     // ANSI Strip Regex for accurate line counting
     const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
@@ -557,7 +558,10 @@ async function streamResponse(page, initialCount) {
             fullText = copied;
         }
 
-        if (process.stdout.isTTY && streamedText.length > 0) {
+        if (process.stdout.isTTY && cursorSaved) {
+            process.stdout.write('\x1b8'); // restore cursor
+            process.stdout.write('\x1b[J'); // clear to end of screen
+        } else if (process.stdout.isTTY && streamedText.length > 0) {
             const lines = calculateRawLines(streamedText);
             for (let i = 0; i < lines; i++) {
                 process.stdout.write('\x1b[2K');
@@ -595,6 +599,10 @@ async function streamResponse(page, initialCount) {
         streamedText += char;
         
         // --- Direct Output ---
+        if (process.stdout.isTTY && !cursorSaved) {
+            process.stdout.write('\x1b7'); // save cursor
+            cursorSaved = true;
+        }
         process.stdout.write(char);
 
         // Speed control

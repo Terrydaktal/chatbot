@@ -457,32 +457,123 @@ async function streamResponse(page, initialCount) {
         function domToMarkdown(node) {
             if (!node) return '';
             let md = '';
-            function process(child) {
-                if (child.nodeType === 3) { md += child.textContent; return; }
+            const listStack = [];
+
+            function append(text) { if (text) md += text; }
+            function trailingNewlines() {
+                const match = md.match(/\n*$/);
+                return match ? match[0].length : 0;
+            }
+            function ensureNewlines(count) {
+                const current = trailingNewlines();
+                if (current < count) md += '\n'.repeat(count - current);
+            }
+            function fenceFor(text) {
+                const matches = text.match(/`+/g) || [];
+                let max = 0;
+                for (const m of matches) max = Math.max(max, m.length);
+                return '`'.repeat(Math.max(3, max + 1));
+            }
+            function inlineFence(text) {
+                const matches = text.match(/`+/g) || [];
+                let max = 0;
+                for (const m of matches) max = Math.max(max, m.length);
+                return '`'.repeat(Math.max(1, max + 1));
+            }
+            function extractCodeBlock(block) {
+                let lang = '';
+                const langEl = block.querySelector('.code-block-decoration span, .header-formatted span, .code-block-decoration');
+                if (langEl) lang = langEl.textContent.trim().toLowerCase();
+                const codeEl = block.querySelector('code[data-test-id="code-content"], pre code, code, pre');
+                let codeText = codeEl ? codeEl.textContent : '';
+                codeText = codeText.replace(/\n$/, '');
+                const fence = fenceFor(codeText);
+                append(`\n\n${fence}${lang ? ' ' + lang : ''}\n${codeText}\n${fence}\n\n`);
+            }
+            function renderChildren(el) {
+                el.childNodes.forEach(child => render(child));
+            }
+            function render(child) {
+                if (child.nodeType === 3) {
+                    append(child.textContent);
+                    return;
+                }
                 if (child.nodeType !== 1) return;
                 const tag = child.tagName.toLowerCase();
                 const isCodeBlock = tag === 'code-block' || child.classList.contains('code-block');
-                const isPre = tag === 'pre';
-                if (isCodeBlock || isPre) {
-                    let lang = '';
-                    if (isCodeBlock) {
-                        const langEl = child.querySelector('.code-block-decoration span, .header-formatted span');
-                        if (langEl) lang = langEl.innerText.trim().toLowerCase();
-                    }
-                    const codeEl = isPre ? child : child.querySelector('code, pre');
-                    if (codeEl) {
-                        let codeText = codeEl.innerText;
-                        codeText = codeText.replace(/^```/gm, '').replace(/```$/gm, '');
-                        md += '\n```' + lang + '\n' + codeText + '\n```\n';
-                        return;
-                    }
+                if (isCodeBlock) {
+                    extractCodeBlock(child);
+                    return;
                 }
-                if (tag === 'p') md += '\n\n';
-                if (tag === 'li') md += '\n* ';
-                if (tag === 'h1' || tag === 'h2') md += '\n## ';
-                child.childNodes.forEach(c => process(c));
+                if (tag === 'pre') {
+                    extractCodeBlock(child);
+                    return;
+                }
+                if (tag === 'br') { append('\n'); return; }
+                if (tag === 'hr') { ensureNewlines(2); append('---'); ensureNewlines(2); return; }
+                if (tag === 'p') { ensureNewlines(2); renderChildren(child); ensureNewlines(2); return; }
+                if (tag === 'h1') { ensureNewlines(2); append('# '); renderChildren(child); ensureNewlines(2); return; }
+                if (tag === 'h2') { ensureNewlines(2); append('## '); renderChildren(child); ensureNewlines(2); return; }
+                if (tag === 'h3') { ensureNewlines(2); append('### '); renderChildren(child); ensureNewlines(2); return; }
+                if (tag === 'h4') { ensureNewlines(2); append('#### '); renderChildren(child); ensureNewlines(2); return; }
+                if (tag === 'h5') { ensureNewlines(2); append('##### '); renderChildren(child); ensureNewlines(2); return; }
+                if (tag === 'h6') { ensureNewlines(2); append('###### '); renderChildren(child); ensureNewlines(2); return; }
+                if (tag === 'ul') {
+                    listStack.push({ type: 'ul', index: 0 });
+                    ensureNewlines(2);
+                    renderChildren(child);
+                    listStack.pop();
+                    ensureNewlines(2);
+                    return;
+                }
+                if (tag === 'ol') {
+                    listStack.push({ type: 'ol', index: 0 });
+                    ensureNewlines(2);
+                    renderChildren(child);
+                    listStack.pop();
+                    ensureNewlines(2);
+                    return;
+                }
+                if (tag === 'li') {
+                    ensureNewlines(1);
+                    const depth = Math.max(0, listStack.length - 1);
+                    const indent = '  '.repeat(depth);
+                    const top = listStack[listStack.length - 1];
+                    let marker = '-';
+                    if (top && top.type === 'ol') marker = `${++top.index}.`;
+                    append(`${indent}${marker} `);
+                    renderChildren(child);
+                    return;
+                }
+                if (tag === 'blockquote') {
+                    ensureNewlines(2);
+                    const original = md;
+                    md = '';
+                    renderChildren(child);
+                    const content = md.trim().split('\n');
+                    md = original;
+                    for (const line of content) append(`> ${line}\n`);
+                    ensureNewlines(2);
+                    return;
+                }
+                if (tag === 'strong' || tag === 'b') { append('**'); renderChildren(child); append('**'); return; }
+                if (tag === 'em' || tag === 'i') { append('_'); renderChildren(child); append('_'); return; }
+                if (tag === 'code') {
+                    const text = child.textContent || '';
+                    const fence = inlineFence(text);
+                    append(`${fence}${text}${fence}`);
+                    return;
+                }
+                if (tag === 'a') {
+                    const href = child.getAttribute('href') || '';
+                    append('[');
+                    renderChildren(child);
+                    append(`](${href})`);
+                    return;
+                }
+                renderChildren(child);
             }
-            node.childNodes.forEach(child => process(child));
+            renderChildren(node);
             return md.trim();
         }
 

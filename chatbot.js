@@ -397,6 +397,7 @@ async function streamResponse(page, initialCount) {
     let fullText = '';
     let responseCompleteTriggered = false;
     let streamedText = '';
+    let finalizeStarted = false;
 
     // ANSI Strip Regex for accurate line counting
     const ansiRegex = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
@@ -417,29 +418,92 @@ async function streamResponse(page, initialCount) {
         return visualLineCount;
     }
 
+    async function fetchCopyMarkdown() {
+        try {
+            return await page.evaluate((responseSelector, responseContainerSelector) => {
+                const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+                const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
+                const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
+                const latest = candidates[candidates.length - 1];
+                const container = latest ? latest.closest(responseContainerSelector) : null;
+                const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
+                if (!copyBtn) return null;
+
+                let captured = null;
+                const onCopy = (e) => {
+                    try {
+                        captured = e.clipboardData.getData('text/plain');
+                    } catch (err) {}
+                    e.preventDefault();
+                };
+                document.addEventListener('copy', onCopy);
+
+                let originalWriteText = null;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    originalWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+                    navigator.clipboard.writeText = async (text) => {
+                        captured = text;
+                        return Promise.resolve();
+                    };
+                }
+
+                const originalExecCommand = document.execCommand;
+                document.execCommand = function () { return true; };
+
+                copyBtn.click();
+
+                return new Promise((resolve) => {
+                    setTimeout(() => {
+                        document.removeEventListener('copy', onCopy);
+                        if (originalWriteText) {
+                            navigator.clipboard.writeText = originalWriteText;
+                        }
+                        document.execCommand = originalExecCommand;
+                        resolve(captured);
+                    }, 50);
+                });
+            }, RESPONSE_SELECTOR, RESPONSE_CONTAINER_SELECTOR);
+        } catch (err) {
+            return null;
+        }
+    }
+
+    async function finalizeResponse() {
+        let finalText = fullText;
+        const copied = await fetchCopyMarkdown();
+        if (copied && copied.trim()) {
+            finalText = copied;
+            fullText = copied;
+        }
+
+        if (process.stdout.isTTY && streamedText.length > 0) {
+            const lines = calculateRawLines(streamedText);
+            for (let i = 0; i < lines; i++) {
+                process.stdout.write('\x1b[2K');
+                if (i < lines - 1) process.stdout.write('\x1b[1A');
+            }
+            process.stdout.write('\r');
+        } else {
+            process.stdout.write('\n');
+        }
+
+        try {
+            console.log(marked(finalText));
+        } catch (e) {
+            console.log(finalText);
+        }
+        resolveStream();
+    }
+
     function typeNextChar() {
         if (charQueue.length === 0) {
             isTyping = false;
             // Check if we are done
             if (responseCompleteTriggered) {
-                if (process.stdout.isTTY && streamedText.length > 0) {
-                    const lines = calculateRawLines(streamedText);
-                    for (let i = 0; i < lines; i++) {
-                        process.stdout.write('\x1b[2K');
-                        if (i < lines - 1) process.stdout.write('\x1b[1A');
-                    }
-                    process.stdout.write('\r');
-                } else {
-                    process.stdout.write('\n');
+                if (!finalizeStarted) {
+                    finalizeStarted = true;
+                    void finalizeResponse();
                 }
-
-                // Render formatted Markdown once
-                try {
-                    console.log(marked(fullText));
-                } catch (e) {
-                    console.log(fullText);
-                }
-                resolveStream();
             }
             return;
         }

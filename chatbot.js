@@ -643,9 +643,12 @@ async function streamResponse(page, initialCount) {
         finalText = normalizeMarkdown(finalText);
         fullText = finalText;
 
-        if (process.stdout.isTTY && streamLines > 0) {
-            if (streamLines > 1) {
-                process.stdout.write(`\x1b[${streamLines - 1}A`);
+        const rawLineCount = calculateRawLines(streamedText || fullText);
+        const linesToClear = Math.max(streamLines, rawLineCount);
+
+        if (process.stdout.isTTY && linesToClear > 0) {
+            if (linesToClear > 1) {
+                process.stdout.write(`\x1b[${linesToClear - 1}A`);
             }
             process.stdout.write('\r');
             process.stdout.write('\x1b[J'); // clear to end of screen

@@ -500,10 +500,10 @@ async function streamResponse(page, initialCount) {
                 const fence = fenceFor(codeText);
                 append(`\n\n${fence}${lang ? ' ' + lang : ''}\n${codeText}\n${fence}\n\n`);
             }
-            function renderChildren(el) {
-                el.childNodes.forEach(child => render(child));
+            function renderChildren(el, inListItem) {
+                el.childNodes.forEach(child => render(child, inListItem));
             }
-            function render(child) {
+            function render(child, inListItem) {
                 if (child.nodeType === 3) {
                     append(child.textContent);
                     return;
@@ -521,17 +521,26 @@ async function streamResponse(page, initialCount) {
                 }
                 if (tag === 'br') { append('\n'); return; }
                 if (tag === 'hr') { ensureNewlines(2); append('---'); ensureNewlines(2); return; }
-                if (tag === 'p') { ensureNewlines(2); renderChildren(child); ensureNewlines(2); return; }
-                if (tag === 'h1') { ensureNewlines(2); append('# '); renderChildren(child); ensureNewlines(2); return; }
-                if (tag === 'h2') { ensureNewlines(2); append('## '); renderChildren(child); ensureNewlines(2); return; }
-                if (tag === 'h3') { ensureNewlines(2); append('### '); renderChildren(child); ensureNewlines(2); return; }
-                if (tag === 'h4') { ensureNewlines(2); append('#### '); renderChildren(child); ensureNewlines(2); return; }
-                if (tag === 'h5') { ensureNewlines(2); append('##### '); renderChildren(child); ensureNewlines(2); return; }
-                if (tag === 'h6') { ensureNewlines(2); append('###### '); renderChildren(child); ensureNewlines(2); return; }
+                if (tag === 'p') {
+                    if (inListItem) {
+                        renderChildren(child, true);
+                    } else {
+                        ensureNewlines(2);
+                        renderChildren(child, false);
+                        ensureNewlines(2);
+                    }
+                    return;
+                }
+                if (tag === 'h1') { ensureNewlines(2); append('# '); renderChildren(child, false); ensureNewlines(2); return; }
+                if (tag === 'h2') { ensureNewlines(2); append('## '); renderChildren(child, false); ensureNewlines(2); return; }
+                if (tag === 'h3') { ensureNewlines(2); append('### '); renderChildren(child, false); ensureNewlines(2); return; }
+                if (tag === 'h4') { ensureNewlines(2); append('#### '); renderChildren(child, false); ensureNewlines(2); return; }
+                if (tag === 'h5') { ensureNewlines(2); append('##### '); renderChildren(child, false); ensureNewlines(2); return; }
+                if (tag === 'h6') { ensureNewlines(2); append('###### '); renderChildren(child, false); ensureNewlines(2); return; }
                 if (tag === 'ul') {
                     listStack.push({ type: 'ul', index: 0 });
                     ensureNewlines(2);
-                    renderChildren(child);
+                    renderChildren(child, false);
                     listStack.pop();
                     ensureNewlines(2);
                     return;
@@ -539,7 +548,7 @@ async function streamResponse(page, initialCount) {
                 if (tag === 'ol') {
                     listStack.push({ type: 'ol', index: 0 });
                     ensureNewlines(2);
-                    renderChildren(child);
+                    renderChildren(child, false);
                     listStack.pop();
                     ensureNewlines(2);
                     return;
@@ -552,22 +561,22 @@ async function streamResponse(page, initialCount) {
                     let marker = '-';
                     if (top && top.type === 'ol') marker = `${++top.index}.`;
                     append(`${indent}${marker} `);
-                    renderChildren(child);
+                    renderChildren(child, true);
                     return;
                 }
                 if (tag === 'blockquote') {
                     ensureNewlines(2);
                     const original = md;
                     md = '';
-                    renderChildren(child);
+                    renderChildren(child, false);
                     const content = md.trim().split('\n');
                     md = original;
                     for (const line of content) append(`> ${line}\n`);
                     ensureNewlines(2);
                     return;
                 }
-                if (tag === 'strong' || tag === 'b') { append('**'); renderChildren(child); append('**'); return; }
-                if (tag === 'em' || tag === 'i') { append('_'); renderChildren(child); append('_'); return; }
+                if (tag === 'strong' || tag === 'b') { append('**'); renderChildren(child, inListItem); append('**'); return; }
+                if (tag === 'em' || tag === 'i') { append('_'); renderChildren(child, inListItem); append('_'); return; }
                 if (tag === 'code') {
                     const text = child.textContent || '';
                     const fence = inlineFence(text);
@@ -577,13 +586,13 @@ async function streamResponse(page, initialCount) {
                 if (tag === 'a') {
                     const href = child.getAttribute('href') || '';
                     append('[');
-                    renderChildren(child);
+                    renderChildren(child, inListItem);
                     append(`](${href})`);
                     return;
                 }
-                renderChildren(child);
+                renderChildren(child, inListItem);
             }
-            renderChildren(node);
+            renderChildren(node, false);
             return md.trim();
         }
 

@@ -664,14 +664,51 @@ async function fetchRecentChats(page) {
         });
       }
 
+      const items = [];
+      const seen = new Set();
+
+      // Strategy 1: Look for explicit conversation items (Angular/SPA structure)
+      const convItems = Array.from(document.querySelectorAll('[data-test-id="conversation"]'));
+      
+      convItems.forEach((el, index) => {
+          let title = '';
+          const titleEl = el.querySelector('.conversation-title');
+          if (titleEl) {
+              title = titleEl.textContent.replace(/\s+/g, ' ').trim();
+          }
+          if (!title) {
+              const aria = el.getAttribute('aria-label');
+              if (aria) title = aria.trim();
+          }
+          if (!title) {
+             const describedBy = el.getAttribute('aria-describedby');
+             if (describedBy) title = tooltipMap.get(describedBy) || '';
+          }
+          
+          if (!title) return; // Skip empty titles
+          
+          const href = el.getAttribute('href') || '';
+          const key = href || `click:${index}`; // Unique key
+          
+          if (seen.has(key)) return;
+          seen.add(key);
+          
+          items.push({ 
+              title, 
+              href, 
+              clickIndex: href ? -1 : index 
+          });
+      });
+
+      if (items.length > 0) return items.slice(0, 30);
+
+      // Strategy 2: Fallback to finding links (older UI or different view)
       const navRoot = document.querySelector('side-navigation-v2') ||
         document.querySelector('bard-side-navigation') ||
         document.querySelector('nav') ||
         document.body;
 
       const links = Array.from(navRoot.querySelectorAll('a[href*="/app/"]'));
-      const items = [];
-      const seen = new Set();
 
       const pickTitle = (el) => {
         const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -693,25 +730,7 @@ async function fetchRecentChats(page) {
         const key = href;
         if (seen.has(key)) continue;
         seen.add(key);
-        items.push({ title, href });
-      }
-
-      if (!items.length) {
-        const candidates = Array.from(navRoot.querySelectorAll('[aria-describedby], [data-test-id], [role="button"]'));
-        for (const el of candidates) {
-          const describedBy = el.getAttribute('aria-describedby') || '';
-          const title = pickTitle(el);
-          if (!title) continue;
-          const dataTestId = (el.getAttribute('data-test-id') || '').toLowerCase();
-          if (!dataTestId.includes('history') && !dataTestId.includes('conversation') && !describedBy) {
-            continue;
-          }
-          const href = el.getAttribute('href') || '';
-          const key = href || title;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          items.push({ title, href });
-        }
+        items.push({ title, href, clickIndex: -1 });
       }
 
       return items.slice(0, 30);
@@ -1322,14 +1341,32 @@ async function startChatInterface(page, browser) {
         } else {
           const selected = await selectChatFromList(chats);
           if (selected) {
-            const targetUrl = selected.href
-              ? new URL(selected.href, GEMINI_URL).toString()
-              : GEMINI_URL;
             console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
-            console.log(chalk.dim(`Navigating to: ${targetUrl}`)); // Debug log
-
-            await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
             
+            if (selected.clickIndex >= 0) {
+                 console.log(chalk.dim('Clicking chat item in sidebar...'));
+                 try {
+                     await page.evaluate((index) => {
+                         const items = document.querySelectorAll('[data-test-id="conversation"]');
+                         if (items[index]) items[index].click();
+                     }, selected.clickIndex);
+                     
+                     // Wait for some network activity or DOM change
+                     try {
+                         await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 });
+                     } catch(e) { /* ignore timeout */ }
+                     
+                 } catch (e) {
+                     console.error(chalk.red('Failed to click chat item:'), e.message);
+                 }
+            } else {
+                const targetUrl = selected.href
+                  ? new URL(selected.href, GEMINI_URL).toString()
+                  : GEMINI_URL;
+                console.log(chalk.dim(`Navigating to: ${targetUrl}`)); // Debug log
+                await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+            }
+
             // Wait for input first (basic app load)
             await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
             

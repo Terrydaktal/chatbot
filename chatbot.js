@@ -1264,7 +1264,7 @@ async function main() {
       await page.goto(GEMINI_URL);
   } else {
     console.log(chalk.green('Found existing Gemini tab. Switching to it...'));
-    await page.bringToFront();
+    // await page.bringToFront(); // Disable auto-focus on reconnect
     await applyVisibilityOverride(page);
     await applyLifecycleOverrides(page);
     if (page.url() !== GEMINI_URL) {

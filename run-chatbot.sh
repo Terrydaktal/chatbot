@@ -2,7 +2,7 @@
 # run-chatbot.sh - Helper to launch Chromium securely and start the chatbot
 
 CHROMIUM_BIN="/bin/chromium"
-PORT="${PORT:-9223}"
+PORT="${PORT:-9233}"
 
 # Check if port is already in use
 if ! lsof -i:$PORT > /dev/null; then
@@ -11,7 +11,8 @@ if ! lsof -i:$PORT > /dev/null; then
     
     # Launching without --user-data-dir uses your default main profile
     # Flags prevent background throttling when the window is minimized/occluded.
-    $CHROMIUM_BIN \
+    # Use setsid to run in a new session, completely detaching from the terminal's process group.
+    setsid $CHROMIUM_BIN \
         --remote-debugging-port=$PORT \
         --no-first-run \
         --no-default-browser-check \

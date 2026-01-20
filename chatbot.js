@@ -42,11 +42,7 @@ const renderer = new TerminalRenderer({
 });
 
 renderer.hr = function () {
-  // Use a shorter, centered separator to avoid ugly wrapping when resizing.
-  // Since we cannot strictly prevent terminal reflow on resize, a shorter line is the robust solution.
-  const width = 50; 
-  const padding = Math.max(0, Math.floor((OUTPUT_WIDTH - width) / 2));
-  return ' '.repeat(padding) + chalk.gray('─'.repeat(width)) + '\n';
+  return '\n\n';
 };
 
 let activeStopTyping = null;

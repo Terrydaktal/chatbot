@@ -964,14 +964,30 @@ async function selectChatFromList(chats) {
         process.stdout.write('\r');
         process.stdout.write('\x1b[J');
       }
-      console.log(chalk.cyan('\nSelect a chat (↑/↓, Enter to open, Esc to cancel):'));
+      
+      const header = chalk.cyan('Select a chat (↑/↓, Enter to open, Esc to cancel):');
+      console.log(header);
+      
       const maxToShow = Math.min(chats.length, 12);
       const start = Math.max(0, Math.min(index - Math.floor(maxToShow / 2), chats.length - maxToShow));
       const end = start + maxToShow;
+      
+      const cols = process.stdout.columns || 80;
+      
       for (let i = start; i < end; i++) {
         const item = chats[i];
-        const label = item.title || '(untitled)';
-        const line = ` ${i === index ? '>' : ' '} ${label}`;
+        let label = item.title || '(untitled)';
+        
+        // Truncate label to prevent wrapping
+        // Prefix is " > " (3 chars) + 1 space = 4 chars roughly
+        const maxLabelWidth = Math.max(10, cols - 6);
+        if (label.length > maxLabelWidth) {
+            label = label.substring(0, maxLabelWidth - 3) + '...';
+        }
+
+        const prefix = i === index ? ' > ' : '   ';
+        const line = `${prefix}${label}`;
+        
         if (i === index) {
           console.log(chalk.inverse(line));
         } else {

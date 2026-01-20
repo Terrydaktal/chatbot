@@ -685,13 +685,13 @@ async function streamResponse(page, initialCount) {
             streamLines += 1;
             streamCol = 0;
         } else {
-            if (streamCol >= OUTPUT_WIDTH - 1) {
-                process.stdout.write('\n');
+            process.stdout.write(char);
+            streamCol += 1;
+            const cols = process.stdout.columns || OUTPUT_WIDTH;
+            if (streamCol >= cols) {
                 streamLines += 1;
                 streamCol = 0;
             }
-            process.stdout.write(char);
-            streamCol += 1;
         }
 
         // Speed control

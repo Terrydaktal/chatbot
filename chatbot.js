@@ -17,7 +17,7 @@ const TerminalRenderer = require('marked-terminal').default || require('marked-t
 const highlight = require('highlight.js');
 
 // Configure Markdown Renderer with Highlighting
-const OUTPUT_WIDTH = Math.min(process.stdout.columns || 80, 88);
+const OUTPUT_WIDTH = 88;
 const TABLE_COL_WIDTH = Math.max(12, Math.floor((OUTPUT_WIDTH - 10) / 3));
 const renderer = new TerminalRenderer({
   width: OUTPUT_WIDTH,

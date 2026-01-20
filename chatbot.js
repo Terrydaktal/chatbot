@@ -923,17 +923,33 @@ async function fetchConversationMessages(page) {
         '.query-text',
         '.user-query'
       ];
-      const userNodes = Array.from(root.querySelectorAll(userSelectors.join(',')));
-      const aiNodes = Array.from(root.querySelectorAll('response-container, model-response, .model-response-text, .message-content, .markdown'));
+      // Use Set to avoid duplicate nodes from overlapping selectors
+      const userNodes = Array.from(new Set(Array.from(root.querySelectorAll(userSelectors.join(',')))));
+      
+      const aiSelectors = [
+          'response-container', 
+          'model-response', 
+          '.model-response-text', 
+          '.message-content', 
+          '.markdown'
+      ];
+      // Filter out nodes that are descendants of other nodes in the list to avoid double counting
+      const rawAiNodes = Array.from(root.querySelectorAll(aiSelectors.join(',')));
+      const aiNodes = rawAiNodes.filter(node => {
+          // If this node has an ancestor that is also in the list, ignore it (we want the top-level container)
+          return !rawAiNodes.some(other => other !== node && other.contains(node));
+      });
 
       const items = [];
-      const seen = new Set();
+      const seenTexts = new Set(); // Dedup by text content
 
       for (const node of userNodes) {
         const text = (node.innerText || node.textContent || '').trim();
         if (!text) continue;
-        if (seen.has(node)) continue;
-        seen.add(node);
+        // Simple dedup: if we've seen this exact text recently, skip. 
+        // (Assumes users don't type exact same thing twice in a row usually, or if they do, we can live with it for now to fix the bug)
+        if (seenTexts.has(text)) continue;
+        seenTexts.add(text);
         items.push({ role: 'user', text, node });
       }
 
@@ -943,8 +959,13 @@ async function fetchConversationMessages(page) {
           text = (node.innerText || node.textContent || '').trim();
         }
         if (!text) continue;
-        if (seen.has(node)) continue;
-        seen.add(node);
+        
+        // Remove trailing "show drafts" or other UI noise
+        text = text.replace(/Show drafts\s*$/, '').trim();
+        
+        if (seenTexts.has(text)) continue;
+        seenTexts.add(text);
+        
         items.push({ role: 'ai', text, node });
       }
 

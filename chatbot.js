@@ -497,6 +497,35 @@ async function fetchCopyMarkdown(page) {
   }
 }
 
+async function applyVisibilityOverride(page) {
+  const overrideScript = () => {
+    const define = (obj, prop, value) => {
+      try {
+        Object.defineProperty(obj, prop, {
+          get: () => value,
+          configurable: true,
+        });
+      } catch (e) {}
+    };
+    define(document, 'hidden', false);
+    define(document, 'visibilityState', 'visible');
+    define(document, 'webkitHidden', false);
+    define(document, 'webkitVisibilityState', 'visible');
+    define(document, 'mozHidden', false);
+    define(document, 'mozVisibilityState', 'visible');
+    define(document, 'msHidden', false);
+    define(document, 'msVisibilityState', 'visible');
+  };
+
+  try {
+    await page.evaluateOnNewDocument(overrideScript);
+  } catch (e) {}
+
+  try {
+    await page.evaluate(overrideScript);
+  } catch (e) {}
+}
+
 async function waitForResponseAndRender(page, initialCount) {
   const stopTyping = startTypingAnimation();
 
@@ -698,10 +727,12 @@ async function main() {
           console.log(chalk.blue('Opening new tab for Gemini...'));
           page = await browser.newPage();
       }
+      await applyVisibilityOverride(page);
       await page.goto(GEMINI_URL);
   } else {
     console.log(chalk.green('Found existing Gemini tab. Switching to it...'));
     await page.bringToFront();
+    await applyVisibilityOverride(page);
     if (page.url() !== GEMINI_URL) {
          await page.goto(GEMINI_URL);
     }

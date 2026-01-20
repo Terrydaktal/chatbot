@@ -1309,8 +1309,7 @@ async function ensureFlashModel(page) {
     try {
         console.log(chalk.yellow('Checking model selector...'));
         
-        // Wait briefly for UI to settle
-        await new Promise(r => setTimeout(r, 2000));
+        // Removed arbitrary sleep - we already wait for page load in main()
 
         // Selector for the model dropdown button. 
         const modelBadgeSelectors = [

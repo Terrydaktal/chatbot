@@ -1133,13 +1133,93 @@ async function ensureStreamHooks(page) {
   exposedPages.add(page);
 }
 
+const helpText = `
+NAME
+    chatbot - A terminal-based CLI for Google Gemini.
+
+SYNOPSIS
+    chatbot [options]
+
+DESCRIPTION
+    A robust, terminal-based interface for Google Gemini using Puppeteer. 
+    It supports persistent sessions, streaming responses, and chat history navigation.
+
+OPTIONS
+    --gemini-fast
+        Use the Gemini Flash (Fast) model.
+    
+    --gemini-pro
+        Use the Gemini Pro (Advanced) model.
+
+    --temp
+        Use a temporary profile instead of the default one.
+
+    --port <number>
+        Connect to an existing browser on the specified remote debugging port.
+
+    --help
+        Display this help message.
+
+OPERATION
+    The chatbot connects to a Chromium instance (either existing or new) and automates
+    interactions with the Gemini web interface. It streams responses directly to the terminal
+    using Markdown rendering.
+
+EXAMPLES
+    Start with default settings:
+        chatbot
+
+    Start with Gemini Fast model:
+        chatbot --gemini-fast
+
+    Start with Gemini Pro model:
+        chatbot --gemini-pro
+
+    Connect to specific port:
+        chatbot --port 9222
+
+FILES
+    ~/.config/chromium
+        Default user data directory for the browser profile.
+    
+    .browser-session
+        Stores the WebSocket endpoint for persistent sessions.
+
+PATHS
+    ${__filename}
+        Main application script.
+
+SECURITY NOTES
+    - This tool automates a real browser session. 
+    - Ensure you are logged into Google in the browser instance.
+    - Session data is stored locally.
+
+EXIT STATUS
+    0   Success
+    1   Error
+    130 Interrupted (Ctrl+C)
+
+AUTHORS
+    Terrydaktal <9lewis9@gmail.com>
+`;
+
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log(helpText);
+    process.exit(0);
+}
+
 program
-  .option('--gemini-flash', 'Use the Gemini Flash model')
+  .option('--gemini-fast', 'Use the Gemini Flash (Fast) model')
+  .option('--gemini-pro', 'Use the Gemini Pro (Advanced) model')
+  .option('--gemini-flash', 'Alias for --gemini-fast (deprecated)')
   .option('--temp', 'Use a temporary profile instead of the default one')
   .option('--port <number>', 'Connect to an existing browser on the specified remote debugging port')
+  .helpOption(false)
+  .allowUnknownOption(true)
   .parse(process.argv);
 
 const options = program.opts();
+if (options.geminiFlash) options.geminiFast = true;
 
 async function getBrowser() {
   let browser;
@@ -1296,22 +1376,22 @@ async function main() {
       console.error(chalk.red('Timeout waiting for page load. Please check the browser window.'));
   }
 
-  if (options.geminiFlash) {
-    console.log(chalk.magenta('Ensuring Gemini Flash model is selected...'));
-    await ensureFlashModel(page);
+  if (options.geminiFast) {
+    console.log(chalk.magenta('Ensuring Gemini Fast/Flash model is selected...'));
+    await ensureModel(page, ['Flash', 'Fast']);
+  } else if (options.geminiPro) {
+    console.log(chalk.magenta('Ensuring Gemini Pro/Advanced model is selected...'));
+    await ensureModel(page, ['Advanced', 'Pro', 'Ultra']);
   }
 
   // Start the interactive chat loop
   startChatInterface(page, browser);
 }
 
-async function ensureFlashModel(page) {
+async function ensureModel(page, modelKeywords) {
     try {
-        console.log(chalk.yellow('Checking model selector...'));
+        console.log(chalk.yellow(`Checking model selector for: ${modelKeywords.join(' or ')}...`));
         
-        // Removed arbitrary sleep - we already wait for page load in main()
-
-        // Selector for the model dropdown button. 
         const modelBadgeSelectors = [
             '[data-test-id="bard-mode-menu-button"]',
             'button.input-area-switch',
@@ -1330,33 +1410,33 @@ async function ensureFlashModel(page) {
             const text = await page.evaluate(el => el.innerText, modelBadge);
             console.log(chalk.dim(`Current model badge text: "${text}"`));
             
-            // Gemini often labels Flash as "Fast"
-            if (text.includes('Flash') || text.includes('Fast')) {
-                console.log(chalk.green('Gemini Flash (Fast) is already active.'));
+            if (modelKeywords.some(kw => text.includes(kw))) {
+                console.log(chalk.green(`Target model (${modelKeywords[0]}) is already active.`));
                 return;
             }
             
-            // Click to open menu
             console.log(chalk.yellow('Opening model menu...'));
             await modelBadge.click();
             
-            // Wait for menu items
             try {
-                // Look for "Flash" in the menu items
-                // Using XPath to find text containing "Flash" more robustly
-                const flashOption = await page.waitForSelector('xpath/.//*[contains(text(), "Flash")]', { timeout: 3000 });
+                let targetOption;
+                for (const kw of modelKeywords) {
+                    try {
+                        targetOption = await page.waitForSelector(`xpath/.//*[contains(text(), "${kw}")]`, { timeout: 1000 });
+                        if (targetOption) break;
+                    } catch(e) {}
+                }
                 
-                if (flashOption) {
-                    console.log(chalk.yellow('Selecting Flash model...'));
-                    await flashOption.click();
-                    // Wait for reload or UI update
+                if (targetOption) {
+                    console.log(chalk.yellow(`Selecting model...`));
+                    await targetOption.click();
                     await new Promise(r => setTimeout(r, 2000));
                     return;
                 } else {
-                     console.log(chalk.red('Flash option not found in menu.'));
+                     console.log(chalk.red(`Model option '${modelKeywords.join('/')}' not found in menu.`));
                 }
             } catch (e) {
-                console.log(chalk.yellow('Could not find Flash option in menu (timeout).'));
+                console.log(chalk.yellow('Could not find model option in menu (timeout).'));
             }
         } else {
              console.log(chalk.red('Could not find model selector dropdown.'));

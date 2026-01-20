@@ -158,14 +158,15 @@ function stripAnsi(value) {
   return value.replace(ANSI_REGEX, '');
 }
 
-function startTypingAnimation() {
+function startStatusAnimation(initialText = 'Gemini is typing') {
   let frameIndex = 0;
+  let currentText = initialText;
   const cols = process.stdout.columns || OUTPUT_WIDTH;
   process.stdout.write('\n');
 
   const render = () => {
     const frame = TYPING_FRAMES[frameIndex % TYPING_FRAMES.length];
-    const text = chalk.yellow(`Gemini is typing ${frame}`);
+    const text = chalk.yellow(`${currentText} ${frame}`);
     const pad = Math.max(0, cols - stripAnsi(text).length);
     process.stdout.write(`\r${text}${' '.repeat(pad)}`);
     frameIndex += 1;
@@ -174,9 +175,12 @@ function startTypingAnimation() {
   render();
   const interval = setInterval(render, TYPING_INTERVAL_MS);
 
-  return () => {
-    clearInterval(interval);
-    process.stdout.write(`\r${' '.repeat(cols)}\r`);
+  return {
+      update: (newText) => { currentText = newText; },
+      stop: () => {
+        clearInterval(interval);
+        process.stdout.write(`\r${' '.repeat(cols)}\r`);
+      }
   };
 }
 
@@ -570,8 +574,9 @@ async function applyLifecycleOverrides(page) {
 }
 
 async function waitForResponseAndRender(page, initialCount) {
-  const stopTyping = startTypingAnimation();
-  activeStopTyping = stopTyping;
+  const status = startStatusAnimation('Gemini is thinking');
+  activeStopTyping = status.stop;
+  
   const keepAlive = setInterval(() => {
     void applyLifecycleOverrides(page);
     void page.evaluate(() => {
@@ -587,6 +592,7 @@ async function waitForResponseAndRender(page, initialCount) {
     const start = Date.now();
     let lastLength = 0;
     let stableCount = 0;
+    let hasStartedTyping = false;
 
     while (true) {
       if (abortRequested) break;
@@ -603,6 +609,11 @@ async function waitForResponseAndRender(page, initialCount) {
         const text = latest ? (latest.innerText || '') : '';
         return { hasCopy: !!copyBtn, textLength: text.length };
       }, initialCount, RESPONSE_SELECTOR, RESPONSE_CONTAINER_SELECTOR);
+
+      if (state.textLength > 0 && !hasStartedTyping) {
+          hasStartedTyping = true;
+          status.update('Gemini is typing');
+      }
 
       if (state.hasCopy) break;
       if (state.textLength > 0) {
@@ -622,7 +633,7 @@ async function waitForResponseAndRender(page, initialCount) {
     clearInterval(keepAlive);
   }
 
-  stopTyping();
+  status.stop();
   activeStopTyping = null;
 
   let finalText = await fetchCopyMarkdown(page);

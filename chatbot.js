@@ -551,13 +551,57 @@ async function streamResponse(page, initialCount) {
         }
     }
 
+    function normalizeMarkdown(md) {
+        const lines = md.split('\n');
+        const out = [];
+        let inFence = false;
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const trimmed = line.trim();
+            if (trimmed.startsWith('```')) {
+                inFence = !inFence;
+                out.push(line);
+                continue;
+            }
+            if (inFence) {
+                out.push(line);
+                continue;
+            }
+            const next = lines[i + 1] || '';
+            const isTableRow = line.includes('|') && /^\s*\|?[-:\s]+\|[-:\s|]*$/.test(next);
+            const isTableSep = /^\s*\|?[-:\s]+\|[-:\s|]*$/.test(line);
+            if (isTableRow || isTableSep) {
+                out.push(line);
+                continue;
+            }
+            if (trimmed === '') {
+                out.push('');
+                continue;
+            }
+            const isBlockStart = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+\.\s|---$|___$|\*\*\*$)/.test(line);
+            if (isBlockStart) {
+                out.push(line);
+                continue;
+            }
+            const prev = out[out.length - 1] || '';
+            const prevBlock = /^(#{1,6}\s|>|\s*[-*+]\s|\s*\d+\.\s|---$|___$|\*\*\*$)/.test(prev);
+            if (out.length && prev !== '' && !prevBlock && !prev.trim().endsWith('  ')) {
+                out[out.length - 1] = `${prev} ${trimmed}`;
+            } else {
+                out.push(trimmed);
+            }
+        }
+        return out.join('\n');
+    }
+
     async function finalizeResponse() {
         let finalText = fullText;
         const copied = await fetchCopyMarkdown();
         if (copied && copied.trim()) {
             finalText = copied;
-            fullText = copied;
         }
+        finalText = normalizeMarkdown(finalText);
+        fullText = finalText;
 
         if (process.stdout.isTTY && streamLines > 0) {
             if (streamLines > 1) {

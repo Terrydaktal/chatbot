@@ -2,7 +2,7 @@
 # run-chatbot.sh - Helper to launch Chromium securely and start the chatbot
 
 CHROMIUM_BIN="/bin/chromium"
-PORT=9233
+PORT="${PORT:-9223}"
 
 # Check if port is already in use
 if ! lsof -i:$PORT > /dev/null; then

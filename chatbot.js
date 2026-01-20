@@ -1157,6 +1157,9 @@ OPTIONS
     --port <number>
         Connect to an existing browser on the specified remote debugging port.
 
+    --reload
+        Force a page reload on startup. Useful if the browser session has timed out.
+
     --help
         Display this help message.
 
@@ -1214,6 +1217,7 @@ program
   .option('--gemini-flash', 'Alias for --gemini-fast (deprecated)')
   .option('--temp', 'Use a temporary profile instead of the default one')
   .option('--port <number>', 'Connect to an existing browser on the specified remote debugging port')
+  .option('--reload', 'Force a page reload on startup to ensure a fresh session')
   .helpOption(false)
   .allowUnknownOption(true)
   .parse(process.argv);
@@ -1345,6 +1349,12 @@ async function main() {
   } else {
     console.log(chalk.green('Found existing Gemini tab. Switching to it...'));
     // await page.bringToFront(); // Disable auto-focus on reconnect
+    
+    if (options.reload) {
+        console.log(chalk.yellow('Reloading page to ensure fresh session...'));
+        await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
+    }
+
     await applyVisibilityOverride(page);
     await applyLifecycleOverrides(page);
     if (page.url() !== GEMINI_URL) {
@@ -2090,6 +2100,8 @@ async function streamResponse(page, initialCount) {
                     }
                 } else if (Date.now() - startTime > 30000) {
                      clearInterval(findResponse);
+                     console.log(chalk.red('\nResponse timed out (>30s). The session might be stale.'));
+                     console.log(chalk.yellow('Try running with --reload to fix connection issues.'));
                      window.onResponseComplete();
                      resolve();
                 }

@@ -1,0 +1,8 @@
+# Ignore everything
+*
+
+# Exceptions (Tracked files)
+!README.md
+!chatbot.js
+!chatbot
+!.gitignore

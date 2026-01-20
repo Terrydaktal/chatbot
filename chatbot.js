@@ -17,20 +17,33 @@ const TerminalRenderer = require('marked-terminal').default || require('marked-t
 const highlight = require('highlight.js');
 
 // Configure Markdown Renderer with Highlighting
+const renderer = new TerminalRenderer({
+  width: process.stdout.columns || 80,
+  reflowText: true,
+  showSectionPrefix: false,
+  tab: 4, // More indentation
+  heading: chalk.bold.blue, // Blue bold headers
+  firstHeading: chalk.bold.blue.underline,
+  strong: chalk.hex('#C8A2C8').bold,
+  em: chalk.italic,
+  blockquote: chalk.gray.italic,
+  code: chalk.yellow, // Inline code color
+  listitem: (text) => '  • ' + text, // Better bullet points
+});
+
+// Ensure inline tokens (like **bold**) are parsed inside text nodes
+renderer.text = function (text) {
+  if (typeof text === 'object') {
+    if (text.tokens) {
+      return this.parser.parseInline(text.tokens);
+    }
+    text = text.text;
+  }
+  return this.o.text(text);
+};
+
 marked.setOptions({
-  renderer: new TerminalRenderer({
-    width: process.stdout.columns || 80,
-    reflowText: true,
-    showSectionPrefix: false,
-    tab: 4, // More indentation
-    heading: chalk.bold.blue, // Blue bold headers
-    firstHeading: chalk.bold.blue.underline,
-    strong: chalk.hex('#C8A2C8').bold,
-    em: chalk.italic,
-    blockquote: chalk.gray.italic,
-    code: chalk.yellow, // Inline code color
-    listitem: (text) => '  • ' + text, // Better bullet points
-  }),
+  renderer,
   highlight: (code, lang) => {
     if (highlight.getLanguage(lang)) {
       return highlight.highlight(code, { language: lang }).value;

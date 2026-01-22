@@ -47,8 +47,19 @@ elif command -v yt-dlp &> /dev/null; then
     YTDLP="yt-dlp"
     IMPERSONATE=""
 else
-    echo "Error: yt-dlp is not installed. Please install it first."
-    exit 1
+    echo "yt-dlp not found. Downloading latest standalone binary..." >&2
+    CURL_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
+    DOWNLOAD_PATH="$(dirname "$0")/yt-dlp"
+    
+    if curl -L "$CURL_URL" -o "$DOWNLOAD_PATH"; then
+        chmod +x "$DOWNLOAD_PATH"
+        YTDLP="$DOWNLOAD_PATH"
+        IMPERSONATE=""
+        echo "yt-dlp downloaded successfully." >&2
+    else
+        echo "Error: Failed to download yt-dlp. Please install it manually."
+        exit 1
+    fi
 fi
 
 if ! command -v jq &> /dev/null; then

@@ -1,0 +1,17 @@
+#!/bin/bash
+# chatbot-login - Launch Chromium for manual login
+
+CHROMIUM_BIN="/bin/chromium"
+USER_DATA_DIR="/home/lewis/.config/chromium-chatbot"
+
+echo "Launching Chromium for manual login..."
+echo "Profile: $USER_DATA_DIR"
+echo "Please log in to Google, then close the browser."
+
+# Launch without automation flags or remote debugging
+$CHROMIUM_BIN \
+    --user-data-dir="$USER_DATA_DIR" \
+    --no-first-run \
+    --no-default-browser-check \
+    --restore-last-session \
+    https://gemini.google.com/app

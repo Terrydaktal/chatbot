@@ -6,3 +6,7 @@
 !chatbot.js
 !chatbot
 !.gitignore
+!transcript
+!chatbot-login
+!package.json
+!package-lock.json

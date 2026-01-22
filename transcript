@@ -1,0 +1,144 @@
+#!/bin/bash
+
+# transcript - Get YouTube video transcript for free
+# Usage: transcript [--all] <url>
+
+GET_ALL=0
+LANG="en" # Default language
+URL=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --all)
+      GET_ALL=1
+      shift
+      ;;
+    --lang)
+      LANG="$2"
+      shift
+      shift
+      ;;
+    http://*|https://*)
+      URL="$1"
+      shift
+      ;;
+    *)
+      echo "Unknown argument: $1"
+      shift
+      ;;
+  esac
+done
+
+if [ -z "$URL" ]; then
+    echo "Usage: transcript [--all] <url>"
+    exit 1
+fi
+
+# Prefer python module if available (with full dependencies), else local binary, else system command
+if python3 -m yt_dlp --version &> /dev/null; then
+    YTDLP="python3 -m yt_dlp"
+    # Enable impersonation if using the python module (more likely to have curl_cffi)
+    IMPERSONATE="--impersonate Chrome"
+elif [ -f "$(dirname "$0")/yt-dlp" ]; then
+    YTDLP="$(dirname "$0")/yt-dlp"
+    IMPERSONATE=""
+elif command -v yt-dlp &> /dev/null; then
+    YTDLP="yt-dlp"
+    IMPERSONATE=""
+else
+    echo "Error: yt-dlp is not installed. Please install it first."
+    exit 1
+fi
+
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq is not installed. Please install it first."
+    exit 1
+fi
+
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEMP_DIR"' EXIT
+
+TITLE=""
+DESCRIPTION=""
+
+if [ $GET_ALL -eq 1 ]; then
+    # echo "Fetching metadata..." >&2
+    TITLE=$($YTDLP $IMPERSONATE --get-title "$URL" 2>/dev/null)
+    DESCRIPTION=$($YTDLP $IMPERSONATE --get-description "$URL" 2>/dev/null)
+fi
+
+# Download auto-generated subtitles in VTT format
+# Strategy: Try requested lang first, then try with cookies.
+# Only fallback to other languages if the user didn't specify a strict custom language (default en).
+
+# echo "Fetching transcript (Attempt 1: $LANG)..." >&2
+$YTDLP $IMPERSONATE --write-auto-subs --sub-lang "$LANG" --skip-download \
+    --output "$TEMP_DIR/sub.%(ext)s" "$URL" > /dev/null 2>&1
+
+# If download failed, try with cookies
+if [ -z "$(find "$TEMP_DIR" -name "sub.*.vtt" | head -n 1)" ]; then
+    # echo "Attempt 2: $LANG with cookies..." >&2
+    $YTDLP $IMPERSONATE --write-auto-subs --sub-lang "$LANG" --skip-download \
+        --cookies-from-browser "chromium:/home/lewis/.config/chromium-chatbot" \
+        --output "$TEMP_DIR/sub.%(ext)s" "$URL" > /dev/null 2>&1
+fi
+
+# Fallbacks (Only if using default English, otherwise respect user choice)
+if [ "$LANG" == "en" ]; then
+    # If STILL failed, fetch RU (high success rate for this specific video and others)
+    if [ -z "$(find "$TEMP_DIR" -name "sub.*.vtt" | head -n 1)" ]; then
+        # echo "Attempt 3: RU..." >&2
+        $YTDLP $IMPERSONATE --write-auto-subs --sub-lang ru --skip-download \
+            --output "$TEMP_DIR/sub.%(ext)s" "$URL" > /dev/null 2>&1
+    fi
+
+    # If STILL failed, fetch any available language
+    if [ -z "$(find "$TEMP_DIR" -name "sub.*.vtt" | head -n 1)" ]; then
+        # echo "Attempt 4: Any language..." >&2
+        $YTDLP $IMPERSONATE --write-auto-subs --sub-lang ".*" --skip-download \
+            --output "$TEMP_DIR/sub.%(ext)s" "$URL" > /dev/null 2>&1
+    fi
+fi
+
+# Find the downloaded subtitle file
+SUB_FILE=$(find "$TEMP_DIR" -name "sub.*.vtt" | head -n 1)
+
+if [ ! -f "$SUB_FILE" ]; then
+    # Try manual subtitles (standard attempt)
+    "$YTDLP" --write-subs --skip-download --output "$TEMP_DIR/sub.%(ext)s" "$URL" > /dev/null 2>&1
+    SUB_FILE=$(find "$TEMP_DIR" -name "sub.*.vtt" | head -n 1)
+    
+    # Retry manual subtitles with cookies if needed
+    if [ ! -f "$SUB_FILE" ]; then
+         "$YTDLP" --write-subs --skip-download \
+            --cookies-from-browser "chromium:/home/lewis/.config/chromium-chatbot" \
+            --output "$TEMP_DIR/sub.%(ext)s" "$URL" > /dev/null 2>&1
+         SUB_FILE=$(find "$TEMP_DIR" -name "sub.*.vtt" | head -n 1)
+    fi
+fi
+
+if [ -f "$SUB_FILE" ]; then
+    # Process VTT to plain text as a single paragraph
+    TRANSCRIPT=$(sed -E \
+        -e '/^[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3} --> [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}.*/d' \
+        -e 's/<[^>]*>//g' \
+        -e '/^(WEBVTT|Kind:|Language:)/d' \
+        -e '/^[[:space:]]*$/d' \
+        "$SUB_FILE" | uniq | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //' | sed 's/ $//')
+    
+    if [ $GET_ALL -eq 1 ]; then
+        # Output as JSON
+        jq -n \
+            --arg title "$TITLE" \
+            --arg description "$DESCRIPTION" \
+            --arg transcript "$TRANSCRIPT" \
+            '{title: $title, description: $description, transcript: $transcript}'
+    else
+        # Output as plain text
+        echo "$TRANSCRIPT"
+    fi
+else
+    echo "Error: Could not retrieve transcript for $URL"
+    exit 1
+fi

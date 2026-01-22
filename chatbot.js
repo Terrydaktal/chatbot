@@ -15,6 +15,7 @@ const readline = require('readline');
 const { marked } = require('marked');
 const TerminalRenderer = require('marked-terminal').default || require('marked-terminal'); // Fallback just in case
 const highlight = require('highlight.js');
+const { execSync } = require('child_process');
 
 // Configure Markdown Renderer with Highlighting
 const OUTPUT_WIDTH = 88;
@@ -578,6 +579,7 @@ async function applyLifecycleOverrides(page) {
   try {
     const client = await page.target().createCDPSession();
     // Keep the page marked as active/visible to reduce background throttling.
+    await client.send('Emulation.setFocusEmulationEnabled', { enabled: true });
     await client.send('Emulation.setIdleOverride', {
       isUserActive: true,
       isScreenUnlocked: true,
@@ -586,9 +588,21 @@ async function applyLifecycleOverrides(page) {
       await client.send('Page.setWebLifecycleState', { state: 'active' });
     } catch (e) {}
     try {
+      // Disable CPU throttling (set rate to 1 = no throttling)
       await client.send('Emulation.setCPUThrottlingRate', { rate: 1 });
     } catch (e) {}
   } catch (e) {}
+  
+  // Also force visibility via JS (redundant but safe)
+  try {
+      await page.evaluate(() => {
+          if (document.hidden) {
+              Object.defineProperty(document, 'hidden', { value: false, writable: true });
+              Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: true });
+              document.dispatchEvent(new Event('visibilitychange'));
+          }
+      });
+  } catch(e) {}
 }
 
 async function waitForResponseAndRender(page, initialCount) {
@@ -1105,8 +1119,9 @@ async function selectChatFromList(chats) {
 
 // Configuration
 const CHROMIUM_PATH = '/bin/chromium'; // Found via `which chromium`
-const USER_DATA_DIR = '/home/lewis/.config/chromium';
+const USER_DATA_DIR = '/home/lewis/.config/chromium-chatbot';
 const SESSION_FILE = path.join(__dirname, '.browser-session');
+const PID_FILE = path.join(__dirname, '.chatbot-pid');
 const GEMINI_URL = 'https://gemini.google.com/app?hl=en-gb';
 const RESPONSE_SELECTOR = '.model-response-text, .markdown, .message-content';
 const RESPONSE_CONTAINER_SELECTOR = 'response-container, .response-container';
@@ -1116,6 +1131,8 @@ const streamHandlers = {
   onFinalMarkdown: null,
   onResponseComplete: null,
 };
+
+
 
 const exposedPages = new WeakSet();
 
@@ -1228,8 +1245,64 @@ if (options.geminiFlash) options.geminiFast = true;
 async function getBrowser() {
   let browser;
 
-  // 1. Connect via specified port
-  if (options.port) {
+  if (options.reload) {
+    console.log(chalk.yellow('Reload requested. Closing existing sessions and processes...'));
+    
+    // 1. Try to close via known session endpoint
+    if (fs.existsSync(SESSION_FILE)) {
+      try {
+        const wsEndpoint = fs.readFileSync(SESSION_FILE, 'utf8').trim();
+        const existingBrowser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint, defaultViewport: null });
+        await existingBrowser.close();
+        console.log(chalk.dim('Closed existing browser session via endpoint.'));
+      } catch (e) {
+        // Ignore if we can't connect/close
+      }
+      fs.unlinkSync(SESSION_FILE);
+    }
+
+    // 2. Kill the specific browser process we started previously
+    if (fs.existsSync(PID_FILE)) {
+      try {
+        const pidStr = fs.readFileSync(PID_FILE, 'utf8').trim();
+        const pid = parseInt(pidStr, 10);
+        if (!isNaN(pid)) {
+          console.log(chalk.dim(`Killing tracked browser process ${pid}...`));
+          try {
+             process.kill(pid, 'SIGTERM');
+             // Wait a moment for process to exit
+             await new Promise(r => setTimeout(r, 1000));
+          } catch(e) {
+             console.log(chalk.dim(`Process ${pid} already exited or cannot be killed.`));
+          }
+        }
+      } catch (e) {
+        console.error(chalk.red('Error reading/killing PID:'), e.message);
+      }
+      // Clean up the PID file
+      try { fs.unlinkSync(PID_FILE); } catch(e) {}
+    }
+
+    // Fallback: Clear SingletonLock if we are sure we are reloading and targeting our profile
+    // (Only if not temp, as temp doesn't use the main lock)
+    if (!options.temp) {
+      const lockFile = path.join(USER_DATA_DIR, 'SingletonLock');
+      if (fs.existsSync(lockFile)) {
+         // We do NOT use fuser here anymore to avoid killing other random Chrome instances.
+         // If the lock persists after killing the specific PID, we assume it's stale and remove it.
+         // But we only remove it if we successfully killed our PID or if we are forced.
+         /* 
+            REMOVED: Deleting SingletonLock manually causes Chromium to detect a crash
+            and reset preferences (search engine, login status) on next boot.
+            We rely on process.kill(SIGTERM) to allow a reasonably clean exit,
+            or let the user handle it if it's truly stuck.
+         */
+      }
+    }
+  }
+
+  // 1. Connect via specified port (Skip if reload is requested, as we want to launch fresh)
+  if (options.port && !options.reload) {
       try {
           const browserURL = `http://127.0.0.1:${options.port}`;
           console.log(chalk.blue(`Connecting to browser at ${browserURL}...`));
@@ -1242,8 +1315,8 @@ async function getBrowser() {
       }
   }
   
-  // 2. Try to connect to existing session if not already connected
-  if (!browser && fs.existsSync(SESSION_FILE)) {
+  // 2. Try to connect to existing session if not already connected (Skip if reload requested)
+  if (!browser && !options.reload && fs.existsSync(SESSION_FILE)) {
     try {
       const wsEndpoint = fs.readFileSync(SESSION_FILE, 'utf8').trim();
       browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint, defaultViewport: null });
@@ -1256,7 +1329,26 @@ async function getBrowser() {
 
   // 3. Launch new browser if still not connected
   if (!browser) {
+      // Check for DISPLAY to prevent immediate crash over SSH
+      // We explicitly check if we can reach the desktop display (:0) using the home Xauthority
+      const targetDisplay = process.env.DISPLAY || ':0';
+      const targetAuth = process.env.XAUTHORITY || path.join(process.env.HOME, '.Xauthority');
+      
+      try {
+         // Try to connect to the target display with the target authority
+         execSync(`XAUTHORITY="${targetAuth}" xdpyinfo -display "${targetDisplay}" >/dev/null 2>&1`);
+         console.log(chalk.dim(`Confirmed access to X server at ${targetDisplay}`));
+      } catch (e) {
+         console.error(chalk.red('\nError: Unable to connect to X server.'));
+         console.error(chalk.yellow(`Could not access display "${targetDisplay}" using authority "${targetAuth}".`));
+         console.error(chalk.white('If running from SSH, this prevents launching the browser on the remote desktop to avoid crashing the profile.'));
+         console.error(chalk.white('Solution: Run "export DISPLAY=:0" and ensure you have access to .Xauthority, or use "ssh -X".'));
+         process.exit(1);
+      }
+
       console.log(chalk.blue('Launching new browser instance...'));
+      console.log(chalk.dim(`DBUS_SESSION_BUS_ADDRESS: ${process.env.DBUS_SESSION_BUS_ADDRESS}`));
+      console.log(chalk.dim(`XDG_CURRENT_DESKTOP: ${process.env.XDG_CURRENT_DESKTOP}`));
       
       const launchOptions = {
         executablePath: CHROMIUM_PATH,
@@ -1268,13 +1360,25 @@ async function getBrowser() {
           '--no-default-browser-check',
           '--disable-background-timer-throttling',
           '--disable-backgrounding-occluded-windows',
-          '--disable-renderer-backgrounding'
+          '--disable-renderer-backgrounding',
+          '--disable-session-crashed-bubble', // Prevent "Restore pages?" popup
+          '--disable-infobars',
+          '--restore-last-session'
         ],
-        ignoreDefaultArgs: ['--enable-automation'],
+        ignoreDefaultArgs: ['--enable-automation', '--disable-blink-features=AutomationControlled'],
         handleSIGINT: false,
         handleSIGTERM: false,
         handleSIGHUP: false,
+        env: {
+            ...process.env,
+            DISPLAY: process.env.DISPLAY || ':0',
+            XAUTHORITY: process.env.XAUTHORITY || path.join(process.env.HOME, '.Xauthority')
+        }
       };
+
+      if (options.port) {
+        launchOptions.args.push(`--remote-debugging-port=${options.port}`);
+      }
 
       try {
           browser = await puppeteer.launch(launchOptions);
@@ -1298,6 +1402,10 @@ async function getBrowser() {
               throw err;
           }
       }
+  }
+
+  if (browser && browser.process()) {
+      fs.writeFileSync(PID_FILE, browser.process().pid.toString());
   }
 
   // Save the WS Endpoint for reuse in subsequent calls
@@ -1349,11 +1457,6 @@ async function main() {
   } else {
     console.log(chalk.green('Found existing Gemini tab. Switching to it...'));
     // await page.bringToFront(); // Disable auto-focus on reconnect
-    
-    if (options.reload) {
-        console.log(chalk.yellow('Reloading page to ensure fresh session...'));
-        await page.reload({ waitUntil: 'networkidle2', timeout: 60000 });
-    }
 
     await applyVisibilityOverride(page);
     await applyLifecycleOverrides(page);
@@ -1430,11 +1533,32 @@ async function ensureModel(page, modelKeywords) {
             
             try {
                 let targetOption;
-                for (const kw of modelKeywords) {
+                
+                // Strategy 1: Look for data-test-id based on keywords
+                // Keywords: ['Flash', 'Fast'] -> data-test-id="bard-mode-option-fast"
+                // Keywords: ['Advanced', 'Pro', 'Ultra'] -> data-test-id="bard-mode-option-pro"
+                
+                const isFast = modelKeywords.some(k => ['Flash', 'Fast'].includes(k));
+                const isPro = modelKeywords.some(k => ['Advanced', 'Pro', 'Ultra'].includes(k));
+                
+                if (isFast) {
                     try {
-                        targetOption = await page.waitForSelector(`xpath/.//*[contains(text(), "${kw}")]`, { timeout: 1000 });
-                        if (targetOption) break;
+                        targetOption = await page.waitForSelector('button[data-test-id="bard-mode-option-fast"]', { timeout: 1000 });
                     } catch(e) {}
+                } else if (isPro) {
+                     try {
+                        targetOption = await page.waitForSelector('button[data-test-id="bard-mode-option-pro"]', { timeout: 1000 });
+                    } catch(e) {}
+                }
+
+                // Strategy 2: Fallback to text matching if explicit IDs fail
+                if (!targetOption) {
+                    for (const kw of modelKeywords) {
+                        try {
+                            targetOption = await page.waitForSelector(`xpath/.//button//span[contains(text(), "${kw}")]`, { timeout: 500 });
+                            if (targetOption) break;
+                        } catch(e) {}
+                    }
                 }
                 
                 if (targetOption) {
@@ -1464,6 +1588,11 @@ async function startChatInterface(page, browser) {
       prompt: chalk.bold.green('\nYou > ')
     });
 
+    rl.on('SIGINT', () => {
+        // Pass to process listener
+        process.emit('SIGINT');
+    });
+
     rl.prompt();
 
     rl.on('line', async (line) => {
@@ -1479,73 +1608,86 @@ async function startChatInterface(page, browser) {
         rl.close(); // Close RL to free up stdin for raw mode
         
         const chats = await fetchRecentChats(page);
+        
+        // Add "New Chat" option at the beginning
+        chats.unshift({ title: chalk.bold.green('+ New Chat'), isNewChat: true });
+
         if (!chats.length) {
           console.log(chalk.yellow('No recent chats found in the sidebar.'));
         } else {
           const selected = await selectChatFromList(chats);
           if (selected) {
-            console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
-            
-            if (selected.clickIndex >= 0) {
-                 console.log(chalk.dim('Clicking chat item in sidebar...'));
-                 try {
-                     await page.evaluate((index) => {
-                         const items = document.querySelectorAll('[data-test-id="conversation"]');
-                         if (items[index]) items[index].click();
-                     }, selected.clickIndex);
-                     
-                     // Wait for some network activity or DOM change
-                     try {
-                         await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 });
-                     } catch(e) { /* ignore timeout */ }
-                     
-                 } catch (e) {
-                     console.error(chalk.red('Failed to click chat item:'), e.message);
-                 }
+            if (selected.isNewChat) {
+                console.log(chalk.cyan('\nStarting new chat...'));
+                await page.goto(GEMINI_URL, { waitUntil: 'networkidle2', timeout: 60000 });
             } else {
-                const targetUrl = selected.href
-                  ? new URL(selected.href, GEMINI_URL).toString()
-                  : GEMINI_URL;
-                console.log(chalk.dim(`Navigating to: ${targetUrl}`)); // Debug log
-                await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+                console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
+                
+                if (selected.clickIndex >= 0) {
+                     console.log(chalk.dim('Clicking chat item in sidebar...'));
+                     try {
+                         await page.evaluate((index) => {
+                             const items = document.querySelectorAll('[data-test-id="conversation"]');
+                             if (items[index]) items[index].click();
+                         }, selected.clickIndex);
+                         
+                         // Wait for some network activity or DOM change
+                         try {
+                             await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 });
+                         } catch(e) { /* ignore timeout */ }
+                         
+                     } catch (e) {
+                         console.error(chalk.red('Failed to click chat item:'), e.message);
+                     }
+                } else {
+                    const targetUrl = selected.href
+                      ? new URL(selected.href, GEMINI_URL).toString()
+                      : GEMINI_URL;
+                    console.log(chalk.dim(`Navigating to: ${targetUrl}`)); // Debug log
+                    await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+                }
             }
 
             // Wait for input first (basic app load)
             await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
             
-            // Try to wait for any message content to appear, to avoid premature "No messages"
-            try {
-                await page.waitForSelector('user-message, response-container, .message-content', { timeout: 5000 });
-            } catch (e) {
-                // It's okay if this times out (e.g. empty new chat), we'll check manually next
+            if (!selected.isNewChat) {
+                // Try to wait for any message content to appear, to avoid premature "No messages"
+                try {
+                    await page.waitForSelector('user-message, response-container, .message-content', { timeout: 5000 });
+                } catch (e) {
+                    // It's okay if this times out (e.g. empty new chat), we'll check manually next
+                }
             }
 
             await applyVisibilityOverride(page);
             await applyLifecycleOverrides(page);
 
-            let history = await fetchConversationMessages(page);
-            
-            // Retry once if empty, in case of slow hydration
-            if (!history.length) {
-                console.log(chalk.dim('Waiting for messages to render...'));
-                await new Promise(r => setTimeout(r, 3000));
-                history = await fetchConversationMessages(page);
-            }
-
-            if (!history.length) {
-              console.log(chalk.yellow('No messages found in this chat.'));
-            } else {
-              console.log(chalk.magenta('\nChat history:\n'));
-              for (const msg of history) {
-                if (msg.role === 'user') {
-                  console.log(chalk.bold.green('You > ') + msg.text);
-                } else {
-                  console.log(chalk.bold.cyan('Gemini > '));
-                  const rendered = marked(normalizeMarkdown(msg.text || ''));
-                  console.log(rendered.trimEnd());
+            if (!selected.isNewChat) {
+                let history = await fetchConversationMessages(page);
+                
+                // Retry once if empty, in case of slow hydration
+                if (!history.length) {
+                    console.log(chalk.dim('Waiting for messages to render...'));
+                    await new Promise(r => setTimeout(r, 3000));
+                    history = await fetchConversationMessages(page);
                 }
-                console.log('');
-              }
+
+                if (!history.length) {
+                  console.log(chalk.yellow('No messages found in this chat.'));
+                } else {
+                  console.log(chalk.magenta('\nChat history:\n'));
+                  for (const msg of history) {
+                    if (msg.role === 'user') {
+                      console.log(chalk.bold.green('You > ') + msg.text);
+                    } else {
+                      console.log(chalk.bold.cyan('Gemini > '));
+                      const rendered = marked(normalizeMarkdown(msg.text || ''));
+                      console.log(rendered.trimEnd());
+                    }
+                    console.log('');
+                  }
+                }
             }
           }
         }
@@ -1588,6 +1730,54 @@ async function startChatInterface(page, browser) {
             }
         }
 
+        // Handle #transcript expansion
+        // Supports flags: #transcript --all --lang "ru" <url>
+        const transcriptRegex = /#transcript\s+(?:(.+?)\s+)?(https?:\/\/[^\s]+)/g;
+        while ((match = transcriptRegex.exec(input)) !== null) {
+            const fullMatch = match[0];
+            const flags = match[1] || ''; // e.g. "--all --lang \"ru\""
+            const url = match[2];
+
+            // Validate YouTube URL
+            const ytRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$/;
+            if (!ytRegex.test(url)) {
+                console.log(chalk.red(`Error: Invalid YouTube URL: ${url}`));
+                expansionError = true;
+                continue;
+            }
+
+            try {
+                console.log(chalk.cyan(`Fetching transcript for: ${url} ${flags ? `(${flags})` : ''}...`));
+                const transcriptPath = path.resolve(__dirname, 'transcript');
+                
+                // Construct command
+                const cmd = flags ? `"${transcriptPath}" ${flags} "${url}"` : `"${transcriptPath}" "${url}"`;
+                
+                const output = execSync(cmd, { encoding: 'utf8' }).trim();
+                
+                let expansion = `\n\n--- Transcript for YouTube video ---\n`;
+                if (flags.includes('--all')) {
+                    try {
+                        const data = JSON.parse(output);
+                        if (data.title) expansion += `Title: ${data.title}\n`;
+                        if (data.description) expansion += `Description: ${data.description}\n`;
+                        expansion += `Transcript: ${data.transcript}\n`;
+                    } catch(e) {
+                        expansion += `Transcript: ${output}\n`;
+                    }
+                } else {
+                    expansion += `Transcript: ${output}\n`;
+                }
+                expansion += `--- End of Transcript ---\n`;
+                
+                replacements.push({ original: fullMatch, content: expansion });
+            } catch (err) {
+                console.log(chalk.red(`Error fetching transcript for ${url}: ${err.message}`));
+                expansionError = true;
+            }
+        }
+
+
         if (expansionError) {
              rl.prompt();
              return;
@@ -1611,6 +1801,7 @@ async function startChatInterface(page, browser) {
 async function sendPromptToGemini(page, promptText) {
   // Enhanced selector list for the main chat input
   const inputSelectors = [
+      '.ql-editor.textarea',
       'div[role="textbox"][contenteditable="true"]',
       'div[contenteditable="true"]', 
       'textarea[placeholder*="Ask"]',
@@ -1638,8 +1829,37 @@ async function sendPromptToGemini(page, promptText) {
        return;
   }
   
+  // Wake up the tab before interaction to prevent background throttling
+  await applyLifecycleOverrides(page);
+  await applyVisibilityOverride(page);
+  
   try {
     await inputElement.focus();
+
+    // Check for stuck "Stop" button and click it if present
+    try {
+        // Expanded selectors for the Stop button
+        const stopSelectors = [
+            'button[aria-label*="Stop"]', 
+            'button[data-test-id="stop-response-button"]',
+            'button.send-button.stop', // Class based
+            'button:has(mat-icon[data-mat-icon-name="stop"])' // Inner icon based
+        ];
+        
+        let stopBtn = null;
+        for (const sel of stopSelectors) {
+            try {
+                stopBtn = await page.$(sel);
+                if (stopBtn) break;
+            } catch(e) {} // :has pseudo-class might require newer Puppeteer/Chrome
+        }
+
+        if (stopBtn) {
+            // console.log(chalk.dim('Clearing stuck "Stop" button...'));
+            await stopBtn.click();
+            await new Promise(r => setTimeout(r, 500)); // Wait for UI to update
+        }
+    } catch (e) {}
 
     // Count existing message bubbles before sending
     const initialCount = await page.evaluate((responseSelector, responseContainerSelector) => {
@@ -1663,12 +1883,22 @@ async function sendPromptToGemini(page, promptText) {
             
             // Fallback if paste event doesn't trigger native insertion (often blocked)
             // But for Gemini's rich text editor, we might need execCommand
-            if (document.activeElement.innerText === '') {
+            if (document.activeElement.innerText.trim() === '') {
                  document.execCommand('insertText', false, text);
             }
         }, promptText);
     } else {
         await page.keyboard.type(promptText);
+        
+        // Verify text was entered
+        const currentText = await page.evaluate(el => el.innerText, inputElement);
+        if (!currentText || currentText.trim() === '') {
+            // console.log(chalk.dim('Typing failed, forcing text insertion...'));
+            await page.evaluate((el, text) => {
+                el.focus();
+                document.execCommand('insertText', false, text);
+            }, inputElement, promptText);
+        }
     }
     
     await new Promise(r => setTimeout(r, 300)); // Small delay for UI update

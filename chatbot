@@ -4,15 +4,27 @@
 CHROMIUM_BIN="/bin/chromium"
 PORT="${PORT:-9233}"
 
+# Check if --reload is passed
+RELOAD=0
+for arg in "$@"; do
+  if [ "$arg" == "--reload" ]; then
+    RELOAD=1
+    break
+  fi
+done
+
 # Check if port is already in use
-if ! lsof -i:$PORT > /dev/null; then
-    echo "Launching Chromium with your MAIN profile on port $PORT..."
-    echo "IMPORTANT: Please close any other Chromium windows before running this."
+if [ $RELOAD -eq 0 ] && ! lsof -i:$PORT > /dev/null; then
+    echo "Launching Chromium with chromium-chatbot profile on port $PORT..."
     
-    # Launching without --user-data-dir uses your default main profile
+    # Ensure environment is set for X11 (essential for SSH usage)
+    export DISPLAY="${DISPLAY:-:0}"
+    export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+
     # Flags prevent background throttling when the window is minimized/occluded.
     # Use setsid to run in a new session, completely detaching from the terminal's process group.
     setsid $CHROMIUM_BIN \
+        --user-data-dir=/home/lewis/.config/chromium-chatbot \
         --remote-debugging-port=$PORT \
         --no-first-run \
         --no-default-browser-check \
@@ -22,11 +34,28 @@ if ! lsof -i:$PORT > /dev/null; then
         --disable-features=CalculateNativeWinOcclusion \
         > /dev/null 2>&1 &
     
+    # Save PID for chatbot.js to manage
+    echo $! > "$(dirname "$0")/.chatbot-pid"
+    
     echo "Waiting for Chromium to initialize..."
     sleep 2
 else
-    echo "Chromium is already running on port $PORT."
+    if [ $RELOAD -eq 1 ]; then
+        echo "Reload requested: Skipping initial browser launch (chatbot.js will handle restart)."
+    else
+        echo "Chromium is already running on port $PORT."
+    fi
 fi
 
+
+# Resolve script directory (handling symlinks)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+
 echo "Starting Chatbot..."
-./chatbot.js --port $PORT "$@"
+"$SCRIPT_DIR/chatbot.js" --port $PORT "$@"

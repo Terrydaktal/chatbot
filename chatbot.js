@@ -1156,8 +1156,12 @@ const SESSION_FILE = path.join(__dirname, '.browser-session');
 const HISTORY_FILE = path.join(__dirname, '.chatbot-history');
 const PID_FILE = path.join(__dirname, '.chatbot-pid');
 const GEMINI_URL = 'https://gemini.google.com/app?hl=en-gb';
+const AI_MODE_URL = 'https://www.google.com/search?udm=50&aep=11';
 const RESPONSE_SELECTOR = '.model-response-text, .markdown, .message-content';
 const RESPONSE_CONTAINER_SELECTOR = 'response-container, .response-container';
+
+const AI_RESPONSE_SELECTOR = '.M8OgIe, .U7izfe, .V3FYCf, .yG46qd, .Iz6ZYc, .Kx5uL, [data-attrid="wa:/description"]';
+const AI_RESPONSE_CONTAINER_SELECTOR = '#search, .main';
 
 const streamHandlers = {
   onNewChunk: null,
@@ -1201,6 +1205,9 @@ OPTIONS
     --gemini-pro
         Use the Gemini Pro (Advanced) model.
 
+    --ai-mode
+        Use Google AI Overviews (Search) instead of Gemini.
+
     --temp
         Use a temporary profile instead of the default one.
 
@@ -1227,6 +1234,9 @@ EXAMPLES
 
     Start with Gemini Pro model:
         chatbot --gemini-pro
+
+    Start in AI Mode (Google Search AI):
+        chatbot --ai-mode
 
     Connect to specific port:
         chatbot --port 9222
@@ -1265,6 +1275,7 @@ program
   .option('--gemini-fast', 'Use the Gemini Flash (Fast) model')
   .option('--gemini-pro', 'Use the Gemini Pro (Advanced) model')
   .option('--gemini-flash', 'Alias for --gemini-fast (deprecated)')
+  .option('--ai-mode', 'Use Google AI Overviews (Search) instead of Gemini')
   .option('--temp', 'Use a temporary profile instead of the default one')
   .option('--port <number>', 'Connect to an existing browser on the specified remote debugging port')
   .option('--reload', 'Force a page reload on startup to ensure a fresh session')
@@ -1471,7 +1482,8 @@ async function main() {
   // 2. The active tab (if it's empty/new tab)
   // 3. New tab
   
-  let page = pages.find(p => p.url().includes('gemini.google.com'));
+  const TARGET_URL = options.aiMode ? AI_MODE_URL : GEMINI_URL;
+  let page = pages.find(p => p.url().includes(options.aiMode ? 'google.com/search' : 'gemini.google.com'));
   
   if (!page) {
       // Check if the first tab is a blank "New Tab"
@@ -1479,23 +1491,33 @@ async function main() {
       const url = firstPage.url();
       if (url === 'about:blank' || url === 'chrome://newtab/' || url === 'chrome://new-tab-page/') {
           page = firstPage;
-          console.log(chalk.blue('Navigating existing new tab to Gemini...'));
+          console.log(chalk.blue(`Navigating existing new tab to ${options.aiMode ? 'AI Mode' : 'Gemini'}...`));
       } else {
-          console.log(chalk.blue('Opening new tab for Gemini...'));
+          console.log(chalk.blue(`Opening new tab for ${options.aiMode ? 'AI Mode' : 'Gemini'}...`));
           page = await browser.newPage();
       }
       await applyVisibilityOverride(page);
       await applyLifecycleOverrides(page);
-      await page.goto(GEMINI_URL);
+      await page.goto(TARGET_URL);
   } else {
-    console.log(chalk.green('Found existing Gemini tab. Switching to it...'));
+    console.log(chalk.green(`Found existing ${options.aiMode ? 'AI Mode' : 'Gemini'} tab. Switching to it...`));
     // await page.bringToFront(); // Disable auto-focus on reconnect
 
     await applyVisibilityOverride(page);
     await applyLifecycleOverrides(page);
-    if (page.url() !== GEMINI_URL) {
-         await page.goto(GEMINI_URL);
+    if (!page.url().includes(options.aiMode ? 'google.com' : 'gemini.google.com')) {
+         await page.goto(TARGET_URL);
     }
+  }
+
+  // Detect actual mode based on URL, in case of redirects or existing tab mismatch
+  const currentUrl = page.url();
+  if (options.aiMode && currentUrl.includes('gemini.google.com')) {
+      console.log(chalk.yellow('Notice: Detected Gemini URL. Switching to Gemini interaction mode.'));
+      options.aiMode = false;
+  } else if (!options.aiMode && currentUrl.includes('google.com/search')) {
+      console.log(chalk.yellow('Notice: Detected Google Search URL. Switching to AI Mode interaction.'));
+      options.aiMode = true;
   }
 
   // Visual confirmation
@@ -1511,23 +1533,26 @@ async function main() {
       });
   } catch(e) {}
 
-  console.log(chalk.cyan('Waiting for Gemini interface to load...'));
+  console.log(chalk.cyan(`Waiting for ${options.aiMode ? 'AI Mode' : 'Gemini'} interface to load...`));
   
   try {
       // Wait for the specific input area container to ensure app is loaded
       // Increased timeout to 5 minutes to allow for login
       console.log(chalk.dim('Waiting up to 5 minutes for page to be ready (please log in if prompted)...'));
-      await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
+      const selector = options.aiMode ? '.ITIRGe, textarea[aria-label="Ask anything"]' : '.ql-editor, textarea, [contenteditable="true"]';
+      await page.waitForSelector(selector, { timeout: 300000 });
   } catch(e) {
       console.error(chalk.red('Timeout waiting for page load. Please check the browser window.'));
   }
 
-  if (options.geminiFast) {
-    console.log(chalk.magenta('Ensuring Gemini Fast/Flash model is selected...'));
-    await ensureModel(page, ['Flash', 'Fast']);
-  } else if (options.geminiPro) {
-    console.log(chalk.magenta('Ensuring Gemini Pro/Advanced model is selected...'));
-    await ensureModel(page, ['Advanced', 'Pro', 'Ultra']);
+  if (!options.aiMode) {
+    if (options.geminiFast) {
+        console.log(chalk.magenta('Ensuring Gemini Fast/Flash model is selected...'));
+        await ensureModel(page, ['Flash', 'Fast']);
+    } else if (options.geminiPro) {
+        console.log(chalk.magenta('Ensuring Gemini Pro/Advanced model is selected...'));
+        await ensureModel(page, ['Advanced', 'Pro', 'Ultra']);
+    }
   }
 
   // Start the interactive chat loop
@@ -1852,9 +1877,347 @@ async function startChatInterface(page, browser) {
   runLoop();
 }
 
+async function fetchDomMarkdownAI(page) {
+  try {
+    return await page.evaluate((responseSelector, responseContainerSelector) => {
+      function domToMarkdown(node) {
+        if (!node) return '';
+        let md = '';
+        const listStack = [];
+
+        function append(text) { if (text) md += text; }
+        function trailingNewlines() {
+          const match = md.match(/\n*$/);
+          return match ? match[0].length : 0;
+        }
+        function ensureNewlines(count) {
+          const current = trailingNewlines();
+          if (current < count) md += '\n'.repeat(count - current);
+        }
+        function fenceFor(text) {
+          const matches = text.match(/`+/g) || [];
+          let max = 0;
+          for (const m of matches) max = Math.max(max, m.length);
+          return '`'.repeat(Math.max(3, max + 1));
+        }
+        function inlineFence(text) {
+          const matches = text.match(/`+/g) || [];
+          let max = 0;
+          for (const m of matches) max = Math.max(max, m.length);
+          return '`'.repeat(Math.max(1, max + 1));
+        }
+        function escapeTableCell(text) {
+          return (text || '').replace(/\s+/g, ' ').replace(/\|/g, '\\|').trim();
+        }
+        function extractTable(table) {
+          const rows = [];
+          let headerCells = [];
+          const thead = table.querySelector('thead');
+          if (thead) {
+            const headerRow = thead.querySelector('tr');
+            if (headerRow) {
+              headerCells = Array.from(headerRow.children)
+                .filter(el => el.tagName && el.tagName.toLowerCase() === 'th')
+                .map(el => escapeTableCell(el.textContent));
+            }
+          }
+          const bodyRows = Array.from(table.querySelectorAll('tbody tr, tr'));
+          for (const row of bodyRows) {
+            const cells = Array.from(row.children)
+              .filter(el => el.tagName && (el.tagName.toLowerCase() === 'td' || el.tagName.toLowerCase() === 'th'))
+              .map(el => escapeTableCell(el.textContent));
+            if (cells.length) rows.push(cells);
+          }
+          if (!headerCells.length && rows.length) {
+            headerCells = rows.shift();
+          }
+          if (!headerCells.length) return;
+          const colCount = Math.max(headerCells.length, ...rows.map(r => r.length));
+          const pad = (arr) => {
+            while (arr.length < colCount) arr.push('');
+            return arr;
+          };
+          const header = pad([...headerCells]);
+          const sep = header.map(() => '---');
+          let out = `\n\n| ${header.join(' | ')} |\n| ${sep.join(' | ')} |\n`;
+          for (const row of rows) {
+            const cells = pad([...row]);
+            out += `| ${cells.join(' | ')} |\n`;
+          }
+          out += '\n';
+          append(out);
+        }
+        function extractCodeBlock(block) {
+          let lang = '';
+          const langEl = block.querySelector('.code-block-decoration span, .header-formatted span, .code-block-decoration');
+          if (langEl) lang = langEl.textContent.trim().toLowerCase();
+          const codeEl = block.querySelector('code[data-test-id=\"code-content\"], pre code, code, pre');
+          let codeText = codeEl ? codeEl.textContent : '';
+          codeText = codeText.replace(/\n$/, '');
+          const fence = fenceFor(codeText);
+          append(`\n\n${fence}${lang ? ' ' + lang : ''}\n${codeText}\n${fence}\n\n`);
+        }
+        function renderChildren(el, inListItem) {
+          el.childNodes.forEach(child => render(child, inListItem));
+        }
+        function render(child, inListItem) {
+          if (child.nodeType === 3) {
+            append(child.textContent);
+            return;
+          }
+          if (child.nodeType !== 1) return;
+          const tag = child.tagName.toLowerCase();
+          const isCodeBlock = tag === 'code-block' || child.classList.contains('code-block');
+          if (isCodeBlock) {
+            extractCodeBlock(child);
+            return;
+          }
+          if (tag === 'pre') {
+            extractCodeBlock(child);
+            return;
+          }
+          if (tag === 'table') {
+            extractTable(child);
+            return;
+          }
+          if (tag === 'br') { append('\n'); return; }
+          if (tag === 'hr') { ensureNewlines(2); append('---'); ensureNewlines(2); return; }
+          if (tag === 'p') {
+            if (inListItem) {
+              renderChildren(child, true);
+            } else {
+              ensureNewlines(2);
+              renderChildren(child, false);
+              ensureNewlines(2);
+            }
+            return;
+          }
+          if (tag === 'h1') { ensureNewlines(2); append('# '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h2') { ensureNewlines(2); append('## '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h3') { ensureNewlines(2); append('### '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h4') { ensureNewlines(2); append('#### '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h5') { ensureNewlines(2); append('##### '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'h6') { ensureNewlines(2); append('###### '); renderChildren(child, false); ensureNewlines(2); return; }
+          if (tag === 'ul') {
+            listStack.push({ type: 'ul', index: 0 });
+            ensureNewlines(2);
+            renderChildren(child, false);
+            listStack.pop();
+            ensureNewlines(2);
+            return;
+          }
+          if (tag === 'ol') {
+            listStack.push({ type: 'ol', index: 0 });
+            ensureNewlines(2);
+            renderChildren(child, false);
+            listStack.pop();
+            ensureNewlines(2);
+            return;
+          }
+          if (tag === 'li') {
+            ensureNewlines(1);
+            const depth = Math.max(0, listStack.length - 1);
+            const indent = '  '.repeat(depth);
+            const top = listStack[listStack.length - 1];
+            let marker = '-';
+            if (top && top.type === 'ol') marker = `${++top.index}.`;
+            append(`${indent}${marker} `);
+            renderChildren(child, true);
+            return;
+          }
+          if (tag === 'blockquote') {
+            ensureNewlines(2);
+            const original = md;
+            md = '';
+            renderChildren(child, false);
+            const content = md.trim().split('\n');
+            md = original;
+            for (const line of content) append(`> ${line}\n`);
+            ensureNewlines(2);
+            return;
+          }
+          if (tag === 'strong' || tag === 'b') { append('**'); renderChildren(child, inListItem); append('**'); return; }
+          if (tag === 'em' || tag === 'i') { append('_'); renderChildren(child, inListItem); append('_'); return; }
+          if (tag === 'code') {
+            const text = child.textContent || '';
+            const fence = inlineFence(text);
+            append(`${fence}${text}${fence}`);
+            return;
+          }
+          if (tag === 'a') {
+            const href = child.getAttribute('href') || '';
+            append('[');
+            renderChildren(child, inListItem);
+            append(`](${href})`);
+            return;
+          }
+          renderChildren(child, inListItem);
+        }
+        renderChildren(node, false);
+        return md.trim();
+      }
+
+      const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+      const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
+      const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
+      const candidate = candidates[candidates.length - 1];
+      if (!candidate) return '';
+      let finalMarkdown = domToMarkdown(candidate);
+      if (!finalMarkdown || finalMarkdown.trim().length === 0) {
+        finalMarkdown = candidate.innerText || '';
+      }
+      return finalMarkdown;
+    }, AI_RESPONSE_SELECTOR, AI_RESPONSE_CONTAINER_SELECTOR);
+  } catch (err) {
+    return '';
+  }
+}
+
+async function fetchCopyMarkdownAI(page) {
+  try {
+    return await page.evaluate((responseSelector, responseContainerSelector) => {
+      const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+      const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
+      const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
+      const latest = candidates[candidates.length - 1];
+      const container = latest ? latest.closest(responseContainerSelector) : null;
+      const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
+      if (!copyBtn) return null;
+
+      let captured = null;
+      const onCopy = (e) => {
+        try {
+          captured = e.clipboardData.getData('text/plain');
+        } catch (err) {}
+        e.preventDefault();
+      };
+      document.addEventListener('copy', onCopy);
+
+      let originalWriteText = null;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        originalWriteText = navigator.clipboard.writeText.bind(navigator.clipboard);
+        navigator.clipboard.writeText = async (text) => {
+          captured = text;
+          return Promise.resolve();
+        };
+      }
+
+      const originalExecCommand = document.execCommand;
+      document.execCommand = function () { return true; };
+
+      copyBtn.click();
+
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          document.removeEventListener('copy', onCopy);
+          if (originalWriteText) {
+            navigator.clipboard.writeText = originalWriteText;
+          }
+          document.execCommand = originalExecCommand;
+          resolve(captured);
+        }, 50);
+      });
+    }, AI_RESPONSE_SELECTOR, AI_RESPONSE_CONTAINER_SELECTOR);
+  } catch (err) {
+    return null;
+  }
+}
+
+async function waitForAIResponseAndRender(page, initialCount) {
+  const status = startStatusAnimation('Google AI is thinking');
+  activeStopTyping = status.stop;
+  
+  const keepAlive = setInterval(() => {
+    void applyLifecycleOverrides(page);
+    void page.evaluate(() => {
+      try {
+        document.dispatchEvent(new Event('visibilitychange'));
+        window.dispatchEvent(new Event('focus'));
+        window.dispatchEvent(new Event('pageshow'));
+      } catch (e) {}
+    });
+  }, 1000);
+
+  try {
+    const start = Date.now();
+    let lastLength = 0;
+    let stableCount = 0;
+    let hasStartedTyping = false;
+
+    while (true) {
+      if (abortRequested) break;
+      const state = await page.evaluate((initialCount, responseSelector, responseContainerSelector) => {
+        const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+        const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
+        const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
+        if (candidates.length <= initialCount) {
+          return { hasCopy: false, textLength: 0 };
+        }
+        const latest = candidates[candidates.length - 1];
+        const container = latest ? latest.closest(responseContainerSelector) : null;
+        const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
+        const text = latest ? (latest.innerText || '') : '';
+        return { hasCopy: !!copyBtn, textLength: text.length };
+      }, initialCount, AI_RESPONSE_SELECTOR, AI_RESPONSE_CONTAINER_SELECTOR);
+
+      if (state.textLength > 0 && !hasStartedTyping) {
+          hasStartedTyping = true;
+          status.update('Google AI is typing');
+      }
+
+      if (state.hasCopy) break;
+      if (state.textLength > 0) {
+        if (state.textLength === lastLength) {
+          stableCount += 1;
+        } else {
+          stableCount = 0;
+          lastLength = state.textLength;
+        }
+        if (stableCount >= 6) break;
+      }
+
+      if (Date.now() - start > 300000) break;
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  } finally {
+    clearInterval(keepAlive);
+  }
+
+  status.stop();
+  activeStopTyping = null;
+
+  let finalText = await fetchCopyMarkdownAI(page);
+  if (!finalText || !finalText.trim()) {
+    finalText = await fetchDomMarkdownAI(page);
+  } else if (!looksLikeMarkdown(finalText)) {
+    const domMarkdown = await fetchDomMarkdownAI(page);
+    if (domMarkdown && domMarkdown.trim()) {
+      finalText = domMarkdown;
+    }
+  }
+
+  finalText = normalizeMarkdown(finalText || '');
+  const rendered = renderMarkdown(finalText);
+  const lines = rendered.split('\n');
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const suffix = i < lines.length - 1 ? '\n' : '';
+    process.stdout.write(`${line}${suffix}`);
+    if (LINE_STREAM_DELAY_MS > 0) {
+      await new Promise(resolve => setTimeout(resolve, LINE_STREAM_DELAY_MS));
+    }
+  }
+  if (!rendered.endsWith('\n')) {
+    process.stdout.write('\n');
+  }
+}
+
 async function sendPromptToGemini(page, promptText) {
   // Enhanced selector list for the main chat input
   const inputSelectors = [
+      '.ITIRGe',
+      'textarea[aria-label="Ask anything"]',
       '.ql-editor.textarea',
       'div[role="textbox"][contenteditable="true"]',
       'div[contenteditable="true"]', 
@@ -1916,11 +2279,15 @@ async function sendPromptToGemini(page, promptText) {
     } catch (e) {}
 
     // Count existing message bubbles before sending
-    const initialCount = await page.evaluate((responseSelector, responseContainerSelector) => {
+    let initialCount = 0;
+    const selectorToCount = options.aiMode ? AI_RESPONSE_SELECTOR : RESPONSE_SELECTOR;
+    const containerToCount = options.aiMode ? AI_RESPONSE_CONTAINER_SELECTOR : RESPONSE_CONTAINER_SELECTOR;
+    
+    initialCount = await page.evaluate((responseSelector, responseContainerSelector) => {
         const allCandidates = Array.from(document.querySelectorAll(responseSelector));
         const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
         return (scopedCandidates.length ? scopedCandidates : allCandidates).length;
-    }, RESPONSE_SELECTOR, RESPONSE_CONTAINER_SELECTOR);
+    }, selectorToCount, containerToCount);
     
     // Send prompt
     if (promptText.length > 200) {
@@ -1958,7 +2325,25 @@ async function sendPromptToGemini(page, promptText) {
     await new Promise(r => setTimeout(r, 300)); // Small delay for UI update
     await page.keyboard.press('Enter');
 
-    await waitForResponseAndRender(page, initialCount);
+    // For AI Mode, Enter might not work for submission (multiline textarea), so we click Send
+    if (options.aiMode) {
+        try {
+            const sendSelectors = ['button[aria-label="Send"]', '.OEueve'];
+            for (const sel of sendSelectors) {
+                const btn = await page.$(sel);
+                if (btn) {
+                     await btn.click();
+                     break;
+                }
+            }
+        } catch(e) {}
+    }
+
+    if (options.aiMode) {
+        await waitForAIResponseAndRender(page, initialCount);
+    } else {
+        await waitForResponseAndRender(page, initialCount);
+    }
 
   } catch (error) {
     console.error(chalk.red('Error interacting with page:'), error.message);

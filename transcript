@@ -35,27 +35,36 @@ if [ -z "$URL" ]; then
     exit 1
 fi
 
-# Prefer python module if available (with full dependencies), else local binary, else system command
-if python3 -m yt_dlp --version &> /dev/null; then
+# Resolve script directory (handling symlinks)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+
+# Prefer local binary, then python module, then system command
+if [ -f "$SCRIPT_DIR/yt-dlp" ]; then
+    YTDLP="$SCRIPT_DIR/yt-dlp"
+    IMPERSONATE=""
+elif python3 -m yt_dlp --version &> /dev/null; then
     YTDLP="python3 -m yt_dlp"
     # Enable impersonation if using the python module (more likely to have curl_cffi)
     IMPERSONATE="--impersonate Chrome"
-elif [ -f "$(dirname "$0")/yt-dlp" ]; then
-    YTDLP="$(dirname "$0")/yt-dlp"
-    IMPERSONATE=""
 elif command -v yt-dlp &> /dev/null; then
     YTDLP="yt-dlp"
     IMPERSONATE=""
 else
     echo "yt-dlp not found. Downloading latest standalone binary..." >&2
     CURL_URL="https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
-    DOWNLOAD_PATH="$(dirname "$0")/yt-dlp"
+    DOWNLOAD_PATH="$SCRIPT_DIR/yt-dlp"
     
     if curl -L "$CURL_URL" -o "$DOWNLOAD_PATH"; then
         chmod +x "$DOWNLOAD_PATH"
         YTDLP="$DOWNLOAD_PATH"
         IMPERSONATE=""
-        echo "yt-dlp downloaded successfully." >&2
+        echo "yt-dlp downloaded successfully to $SCRIPT_DIR." >&2
     else
         echo "Error: Failed to download yt-dlp. Please install it manually."
         exit 1

@@ -16,6 +16,7 @@ const { marked } = require('marked');
 const TerminalRenderer = require('marked-terminal').default || require('marked-terminal'); // Fallback just in case
 const highlight = require('highlight.js');
 const { execSync } = require('child_process');
+const wrapAnsi = require('wrap-ansi');
 
 // Configure Markdown Renderer with Highlighting
 const OUTPUT_WIDTH = 88;
@@ -24,27 +25,70 @@ const TYPING_FRAMES = ['●○○○', '○●○○', '○○●○', '○○�
 const TYPING_INTERVAL_MS = 120;
 const LINE_STREAM_DELAY_MS = 20;
 const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
-const renderer = new TerminalRenderer({
-  width: OUTPUT_WIDTH,
-  reflowText: false,
-  showSectionPrefix: false,
-  tab: 4, // More indentation
-  heading: chalk.bold.blue, // Blue bold headers
-  firstHeading: chalk.bold.blue.underline,
-  strong: chalk.hex('#C8A2C8').bold,
-  em: chalk.italic,
-  blockquote: chalk.gray.italic,
-  code: chalk.yellow, // Inline code color
-  listitem: (text) => '  • ' + text, // Better bullet points
-  tableOptions: {
-    wordWrap: true,
-    colWidths: [TABLE_COL_WIDTH, TABLE_COL_WIDTH, TABLE_COL_WIDTH, TABLE_COL_WIDTH]
-  }
-});
 
-renderer.hr = function () {
-  return '\n\n';
-};
+function getRenderer() {
+    const cols = process.stdout.columns || OUTPUT_WIDTH;
+    
+    const r = new TerminalRenderer({
+      width: cols - 4, // Safety margin
+      reflowText: true,
+      showSectionPrefix: false,
+      tab: 4, 
+      heading: chalk.bold.blue,
+      firstHeading: chalk.bold.blue.underline,
+      strong: chalk.hex('#C8A2C8').bold,
+      em: chalk.italic,
+      blockquote: chalk.gray.italic,
+      code: chalk.yellow,
+      listitem: (text) => {
+          // We override listitem to ensure proper hanging indents and wrapping that
+          // marked-terminal's default reflow sometimes misses on nested lists.
+          
+          const padding = '  '; // Align with the default bullet that marked-terminal adds (* )
+          
+          // Get current terminal width
+          const cols = process.stdout.columns || OUTPUT_WIDTH;
+          
+          // Calculate safe wrap width. 
+          // We subtract 12 chars to account for:
+          // - Global margins (4)
+          // - Potential nesting indentation (e.g. 2 levels * 2 spaces = 4)
+          // - The bullet itself (2)
+          const wrapWidth = Math.max(20, cols - 12);
+
+          // Flatten text to single line to remove existing random newlines
+          const cleanText = text.replace(/\s+/g, ' ').trim();
+
+          // Hard wrap at the calculated width
+          const wrapped = wrapAnsi(cleanText, wrapWidth, { trim: false, hard: true });
+          
+          // Indent lines after the first one to create the hanging indent
+          return wrapped.replace(/\n/g, '\n' + padding) + '\n';
+      },
+      tableOptions: {
+        wordWrap: true,
+        // Removed fixed colWidths to allow auto-sizing based on content
+        style: { head: [], border: [] }
+      }
+    });
+    
+    r.hr = function () { return '\n\n'; };
+    
+    // Ensure inline tokens are parsed
+    r.text = function (text) {
+      if (typeof text === 'object') {
+        if (text.tokens) return this.parser.parseInline(text.tokens);
+        text = text.text;
+      }
+      return this.o.text(text);
+    };
+    
+    return r;
+}
+
+function renderMarkdown(text) {
+    return marked(text, { renderer: getRenderer() });
+}
 
 let globalBrowser = null;
 let activeStopTyping = null;
@@ -65,19 +109,7 @@ process.on('SIGINT', () => {
   process.exit(130);
 });
 
-// Ensure inline tokens (like **bold**) are parsed inside text nodes
-renderer.text = function (text) {
-  if (typeof text === 'object') {
-    if (text.tokens) {
-      return this.parser.parseInline(text.tokens);
-    }
-    text = text.text;
-  }
-  return this.o.text(text);
-};
-
 marked.setOptions({
-  renderer,
   highlight: (code, lang) => {
     const rawLang = (lang || '').toString().trim().toLowerCase();
     const aliasMap = {
@@ -679,7 +711,7 @@ async function waitForResponseAndRender(page, initialCount) {
   }
 
   finalText = normalizeMarkdown(finalText || '');
-  const rendered = marked(finalText);
+  const rendered = renderMarkdown(finalText);
   const lines = rendered.split('\n');
 
   for (let i = 0; i < lines.length; i++) {
@@ -1121,6 +1153,7 @@ async function selectChatFromList(chats) {
 const CHROMIUM_PATH = '/bin/chromium'; // Found via `which chromium`
 const USER_DATA_DIR = '/home/lewis/.config/chromium-chatbot';
 const SESSION_FILE = path.join(__dirname, '.browser-session');
+const HISTORY_FILE = path.join(__dirname, '.chatbot-history');
 const PID_FILE = path.join(__dirname, '.chatbot-pid');
 const GEMINI_URL = 'https://gemini.google.com/app?hl=en-gb';
 const RESPONSE_SELECTOR = '.model-response-text, .markdown, .message-content';
@@ -1582,11 +1615,25 @@ async function ensureModel(page, modelKeywords) {
 
 async function startChatInterface(page, browser) {
   const runLoop = () => {
+    let isProcessing = false;
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
-      prompt: chalk.bold.green('\nYou > ')
+      prompt: chalk.bold.green('\nYou > '),
+      historySize: 1000
     });
+
+    // Load history
+    if (fs.existsSync(HISTORY_FILE)) {
+        try {
+            // Read lines, filter empty, and reverse because rl.history expects [newest, ..., oldest]
+            const savedHistory = fs.readFileSync(HISTORY_FILE, 'utf8')
+                .split('\n')
+                .map(l => l.trim())
+                .filter(Boolean);
+            rl.history = savedHistory.reverse();
+        } catch (e) {}
+    }
 
     rl.on('SIGINT', () => {
         // Pass to process listener
@@ -1596,7 +1643,14 @@ async function startChatInterface(page, browser) {
     rl.prompt();
 
     rl.on('line', async (line) => {
+      if (isProcessing) return;
       const input = line.trim();
+      
+      if (input) {
+          // Save to persistent history file
+          fs.appendFileSync(HISTORY_FILE, input + '\n');
+      }
+
       if (input.toLowerCase() === 'exit' || input.toLowerCase() === 'quit') {
         rl.close();
         console.log(chalk.blue('Exiting CLI. Browser session remains open for reuse.'));
@@ -1682,7 +1736,7 @@ async function startChatInterface(page, browser) {
                       console.log(chalk.bold.green('You > ') + msg.text);
                     } else {
                       console.log(chalk.bold.cyan('Gemini > '));
-                      const rendered = marked(normalizeMarkdown(msg.text || ''));
+                      const rendered = renderMarkdown(normalizeMarkdown(msg.text || ''));
                       console.log(rendered.trimEnd());
                     }
                     console.log('');
@@ -1787,9 +1841,9 @@ async function startChatInterface(page, browser) {
             finalPrompt = finalPrompt.replace(rep.original, rep.content);
         }
 
-        rl.pause(); // Stop input while processing
+        isProcessing = true;
         await sendPromptToGemini(page, finalPrompt);
-        rl.resume();
+        isProcessing = false;
       }
       rl.prompt();
     });
@@ -2099,11 +2153,11 @@ async function streamResponse(page, initialCount) {
         }
 
         try {
-            console.log(marked(finalText));
+            console.log(renderMarkdown(finalText));
         } catch (e) {
             console.log(finalText);
         }
-        resolveStream();
+        resolveStream(finalText);
     }
 
     function typeNextChar() {

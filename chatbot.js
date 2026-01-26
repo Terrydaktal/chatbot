@@ -1710,6 +1710,10 @@ async function ensureModel(page, modelKeywords) {
 async function startChatInterface(page, browser) {
   const runLoop = () => {
     let isProcessing = false;
+    let pendingLines = [];
+    let pendingTimer = null;
+    let pasteBuffer = null;
+    let awaitingPasteConfirm = false;
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -1736,9 +1740,10 @@ async function startChatInterface(page, browser) {
 
     rl.prompt();
 
-    rl.on('line', async (line) => {
+    const handleInput = async (line) => {
       if (isProcessing) return;
-      const input = line.trim();
+      const rawInput = line;
+      const input = rawInput.trim();
       
       if (input) {
           // Save to persistent history file
@@ -1846,7 +1851,7 @@ async function startChatInterface(page, browser) {
       }
 
       if (input) {
-        let finalPrompt = input;
+        let finalPrompt = rawInput;
         
         // Replace leading ~ with "answer in one sentence: "
         if (finalPrompt.startsWith('~')) {
@@ -1861,7 +1866,7 @@ async function startChatInterface(page, browser) {
         // Collect replacements first to avoid issues with regex index when modifying string
         const replacements = [];
         
-        while ((match = includeRegex.exec(input)) !== null) {
+        while ((match = includeRegex.exec(rawInput)) !== null) {
             const fullMatch = match[0];
             const filePath = match[2] || match[3] || match[4];
             
@@ -1886,7 +1891,7 @@ async function startChatInterface(page, browser) {
         // Handle #transcript expansion
         // Supports flags: #transcript --all --lang "ru" <url>
         const transcriptRegex = /#transcript\s+(?:(.+?)\s+)?(https?:\/\/[^\s]+)/g;
-        while ((match = transcriptRegex.exec(input)) !== null) {
+        while ((match = transcriptRegex.exec(rawInput)) !== null) {
             const fullMatch = match[0];
             const flags = match[1] || ''; // e.g. "--all --lang \"ru\""
             const url = match[2];
@@ -1945,6 +1950,49 @@ async function startChatInterface(page, browser) {
         isProcessing = false;
       }
       rl.prompt();
+    };
+
+    const flushPendingLines = () => {
+      if (!pendingLines.length) return;
+      const lines = pendingLines;
+      pendingLines = [];
+      pendingTimer = null;
+      if (lines.length === 1) {
+        void handleInput(lines[0]);
+        return;
+      }
+      pasteBuffer = lines.join('\n');
+      awaitingPasteConfirm = true;
+      console.log(chalk.yellow('Pasted multi-line input. Press Enter to send, or type /cancel to discard.'));
+      rl.prompt();
+    };
+
+    rl.on('line', async (line) => {
+      if (isProcessing) return;
+
+      if (awaitingPasteConfirm) {
+        const trimmed = line.trim();
+        if (trimmed.toLowerCase() === '/cancel') {
+          pasteBuffer = null;
+          awaitingPasteConfirm = false;
+          rl.prompt();
+          return;
+        }
+        if (trimmed === '' || trimmed.toLowerCase() === '/send') {
+          const payload = pasteBuffer || '';
+          pasteBuffer = null;
+          awaitingPasteConfirm = false;
+          await handleInput(payload);
+          return;
+        }
+        pasteBuffer = pasteBuffer ? `${pasteBuffer}\n${line}` : line;
+        rl.prompt();
+        return;
+      }
+
+      pendingLines.push(line);
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(flushPendingLines, 80);
     });
   };
 

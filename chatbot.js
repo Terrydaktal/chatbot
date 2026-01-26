@@ -25,8 +25,8 @@ const TYPING_FRAMES = ['●○○○', '○●○○', '○○●○', '○○�
 const TYPING_INTERVAL_MS = 120;
 const LINE_STREAM_DELAY_MS = 0;
 const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
-const AI_RESPONSE_POLL_INTERVAL_MS = 200;
-const AI_RESPONSE_STABLE_TICKS = 3;
+const AI_RESPONSE_POLL_INTERVAL_MS = 150;
+const AI_RESPONSE_STABLE_TICKS = 2;
 const AI_SUBMIT_CONFIRM_TIMEOUT_MS = 400;
 const AI_SUBMIT_CONFIRM_INTERVAL_MS = 80;
 
@@ -2509,6 +2509,49 @@ async function sendPromptToAiMode(page, inputElement, promptText, initialCount) 
   }
 }
 
+async function findVisibleInput(page, selectors, preferAiMode, timeoutMs = 1500) {
+  const selector = selectors.join(', ');
+  try {
+    await page.waitForSelector(selector, { timeout: timeoutMs });
+  } catch (e) {}
+  const handle = await page.evaluateHandle((selectorList, preferAi) => {
+    const isVisible = (el) => {
+      if (!el) return false;
+      const style = window.getComputedStyle(el);
+      if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+      return el.offsetHeight > 0 && el.offsetWidth > 0;
+    };
+    const candidates = [];
+    selectorList.forEach((sel, selIndex) => {
+      document.querySelectorAll(sel).forEach((el, index) => {
+        if (!isVisible(el)) return;
+        const rect = el.getBoundingClientRect();
+        candidates.push({
+          el,
+          selIndex,
+          index,
+          bottom: rect.bottom,
+          inInputPlate: Boolean(el.closest('div[data-xid="aim-mars-input-plate"]')),
+        });
+      });
+    });
+    if (!candidates.length) return null;
+    let pool = candidates;
+    if (preferAi) {
+      const inPlate = candidates.filter((c) => c.inInputPlate);
+      if (inPlate.length) pool = inPlate;
+    }
+    pool.sort((a, b) => b.bottom - a.bottom);
+    return pool[0].el;
+  }, selectors, preferAiMode);
+  const element = handle.asElement();
+  if (!element) {
+    await handle.dispose();
+    return null;
+  }
+  return element;
+}
+
 async function sendPromptToGemini(page, promptText) {
   // Enhanced selector list for the main chat input
   const inputSelectors = [
@@ -2521,21 +2564,7 @@ async function sendPromptToGemini(page, promptText) {
       'textarea'
   ];
   
-  let inputElement;
-  for (const selector of inputSelectors) {
-      try {
-          inputElement = await page.waitForSelector(selector, { timeout: 2000 });
-          if (inputElement) {
-              // Double check visibility
-              const isVisible = await page.evaluate(el => {
-                  const style = window.getComputedStyle(el);
-                  return style && style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
-              }, inputElement);
-              
-              if (isVisible) break;
-          }
-      } catch (e) { continue; }
-  }
+  const inputElement = await findVisibleInput(page, inputSelectors, options.aiMode, 1500);
 
   if (!inputElement) {
        console.error(chalk.red('Could not find chat input box. The page layout might have changed.'));

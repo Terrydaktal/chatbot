@@ -611,6 +611,23 @@ async function applyVisibilityOverride(page) {
         Object.defineProperty(target, 'cancelAnimationFrame', { value: caf, configurable: true });
         Object.defineProperty(target, 'webkitCancelAnimationFrame', { value: caf, configurable: true });
     } catch (e) {}
+
+    // AudioContext hack to force "active" state (prevents tab suspension)
+    try {
+        if (!window.__audioKeepAlive) {
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            if (AudioContext) {
+                const ctx = new AudioContext();
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                gain.gain.value = 0.0001; // Effectively silent
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start();
+                window.__audioKeepAlive = ctx;
+            }
+        }
+    } catch (e) {}
   };
 
   try {
@@ -1205,8 +1222,8 @@ const AI_MODE_URL = 'https://www.google.com/search?udm=50&aep=11';
 const RESPONSE_SELECTOR = '.model-response-text, .markdown, .message-content';
 const RESPONSE_CONTAINER_SELECTOR = 'response-container, .response-container';
 
-const AI_RESPONSE_SELECTOR = '.M8OgIe, .U7izfe, .V3FYCf, .yG46qd, .Iz6ZYc, .Kx5uL, [data-attrid="wa:/description"]';
-const AI_RESPONSE_CONTAINER_SELECTOR = '#search, .main';
+const AI_RESPONSE_SELECTOR = '[data-xid="aim-mars-turn-root"] [data-xid="VpUvz"], [data-xid="aim-mars-turn-root"]';
+const AI_RESPONSE_CONTAINER_SELECTOR = '[data-xid="aim-mars-turn-root"]';
 const AI_SEND_SELECTORS = ['button[aria-label="Send"]', 'button[data-xid="input-plate-send-button"]', '.OEueve'];
 
 const streamHandlers = {
@@ -1451,6 +1468,8 @@ async function getBrowser() {
           '--disable-background-timer-throttling',
           '--disable-backgrounding-occluded-windows',
           '--disable-renderer-backgrounding',
+          '--disable-features=CalculateNativeWinOcclusion',
+          '--disable-ipc-flooding-protection',
           '--disable-session-crashed-bubble', // Prevent "Restore pages?" popup
           '--disable-infobars',
           '--restore-last-session'
@@ -1825,6 +1844,11 @@ async function startChatInterface(page, browser) {
       if (input) {
         let finalPrompt = input;
         
+        // Replace leading ~ with "answer in one sentence: "
+        if (finalPrompt.startsWith('~')) {
+            finalPrompt = 'answer in one sentence: ' + finalPrompt.substring(1);
+        }
+        
         // Handle @include expansion
         const includeRegex = /@include\s+("([^"]+)"|'([^']+)'|([^\s]+))/g;
         let match;
@@ -2173,13 +2197,28 @@ async function waitForAIResponseAndRender(page, initialCount) {
   const status = startStatusAnimation('Google AI is thinking');
   activeStopTyping = status.stop;
   
-  const keepAlive = setInterval(() => {
+  const keepAlive = setInterval(async () => {
     void applyLifecycleOverrides(page);
+    
+    // Force layout update via viewport jitter (unfreezes minimized rendering)
+    try {
+        const vp = page.viewport();
+        if (vp) {
+             await page.setViewport({ ...vp, width: vp.width + 1 });
+             setTimeout(async () => {
+                 try { await page.setViewport(vp); } catch(e){}
+             }, 100);
+        }
+    } catch(e) {}
+
     void page.evaluate(() => {
       try {
         document.dispatchEvent(new Event('visibilitychange'));
         window.dispatchEvent(new Event('focus'));
         window.dispatchEvent(new Event('pageshow'));
+        // Scroll jitter 
+        window.scrollBy(0, 1);
+        setTimeout(() => window.scrollBy(0, -1), 50);
       } catch (e) {}
     });
   }, 1000);
@@ -2202,7 +2241,8 @@ async function waitForAIResponseAndRender(page, initialCount) {
         const latest = candidates[candidates.length - 1];
         const container = latest ? latest.closest(responseContainerSelector) : null;
         const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
-        const text = latest ? (latest.innerText || '') : '';
+        // Use textContent to detect text even if layout is throttled in background
+        const text = latest ? (latest.textContent || '') : '';
         return { hasCopy: !!copyBtn, textLength: text.length };
       }, initialCount, AI_RESPONSE_SELECTOR, AI_RESPONSE_CONTAINER_SELECTOR);
 

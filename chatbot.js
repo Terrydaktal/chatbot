@@ -223,8 +223,23 @@ function startStatusAnimation(initialText = 'Gemini is typing') {
   };
 }
 
+function stripAiBoilerplate(md) {
+  if (!md) return md;
+  const patterns = [
+    /AI responses may include mistakes\.?\s*Learn more/gi,
+    /Creating a public link(?:\.{3}|\u2026)?/gi,
+    /Thank you\s*Your feedback helps\s*Google improve\.?\s*See our Privacy Policy\.?\s*Share more feedback\s*Report a problem\s*Close/gi,
+    /Share more feedback\s*Report a problem\s*Close/gi,
+  ];
+  let cleaned = md;
+  for (const pattern of patterns) {
+    cleaned = cleaned.replace(pattern, '');
+  }
+  return cleaned.trim();
+}
+
 function normalizeMarkdown(md) {
-  const lines = md.split('\n');
+  const lines = stripAiBoilerplate(md || '').split('\n');
   const out = [];
   let inFence = false;
   let inTable = false;
@@ -2591,7 +2606,7 @@ async function streamResponse(page, initialCount) {
     }
 
     function normalizeMarkdown(md) {
-        const lines = md.split('\n');
+        const lines = stripAiBoilerplate(md || '').split('\n');
         const out = [];
         let inFence = false;
         let inTable = false;

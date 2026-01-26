@@ -2240,14 +2240,16 @@ async function waitForAIResponseAndRender(page, initialCount) {
         const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
         const candidates = scopedCandidates.length ? scopedCandidates : allCandidates;
         if (candidates.length <= initialCount) {
-          return { hasCopy: false, textLength: 0 };
+          return { hasCopy: false, textLength: 0, hasFooter: false };
         }
         const latest = candidates[candidates.length - 1];
         const container = latest ? latest.closest(responseContainerSelector) : null;
         const copyBtn = container ? container.querySelector('button[data-test-id="copy-button"]') : null;
         // Use textContent to detect text even if layout is throttled in background
         const text = latest ? (latest.textContent || '') : '';
-        return { hasCopy: !!copyBtn, textLength: text.length };
+        const lower = text.toLowerCase();
+        const hasFooter = lower.includes('ai responses may include mistakes');
+        return { hasCopy: !!copyBtn, textLength: text.length, hasFooter };
       }, initialCount, AI_RESPONSE_SELECTOR, AI_RESPONSE_CONTAINER_SELECTOR);
 
       if (state.textLength > 0 && !hasStartedTyping) {
@@ -2255,7 +2257,7 @@ async function waitForAIResponseAndRender(page, initialCount) {
           status.update('Google AI is typing');
       }
 
-      if (state.hasCopy) break;
+      if (state.hasCopy || state.hasFooter) break;
       if (state.textLength > 0) {
         if (state.textLength === lastLength) {
           stableCount += 1;

@@ -607,9 +607,35 @@ async function applyVisibilityOverride(page) {
   } catch (e) {}
 }
 
-async function applyLifecycleOverrides(page) {
+const cdpSessions = new WeakMap();
+const cdpScreencastStarted = new WeakSet();
+
+async function getCdpSession(page) {
+  const cached = cdpSessions.get(page);
+  if (cached) return cached;
   try {
     const client = await page.target().createCDPSession();
+    cdpSessions.set(page, client);
+    return client;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function applyLifecycleOverrides(page) {
+  try {
+    const client = await getCdpSession(page);
+    if (!client) return;
+    if (!cdpScreencastStarted.has(page)) {
+      try {
+        // Force rendering via screencast (essential for minimized windows)
+        await client.send('Page.startScreencast', { format: 'jpeg', quality: 0, everyNthFrame: 1, maxWidth: 16, maxHeight: 16 });
+        client.on('Page.screencastFrame', async (p) => {
+          try { await client.send('Page.screencastFrameAck', { sessionId: p.sessionId }); } catch(e){}
+        });
+        cdpScreencastStarted.add(page);
+      } catch (e) {}
+    }
     // Keep the page marked as active/visible to reduce background throttling.
     await client.send('Emulation.setFocusEmulationEnabled', { enabled: true });
     await client.send('Emulation.setIdleOverride', {
@@ -623,7 +649,11 @@ async function applyLifecycleOverrides(page) {
       // Disable CPU throttling (set rate to 1 = no throttling)
       await client.send('Emulation.setCPUThrottlingRate', { rate: 1 });
     } catch (e) {}
-  } catch (e) {}
+  } catch (e) {
+      // If session is closed, remove from cache
+      cdpSessions.delete(page);
+      cdpScreencastStarted.delete(page);
+  }
   
   // Also force visibility via JS (redundant but safe)
   try {
@@ -1162,6 +1192,7 @@ const RESPONSE_CONTAINER_SELECTOR = 'response-container, .response-container';
 
 const AI_RESPONSE_SELECTOR = '.M8OgIe, .U7izfe, .V3FYCf, .yG46qd, .Iz6ZYc, .Kx5uL, [data-attrid="wa:/description"]';
 const AI_RESPONSE_CONTAINER_SELECTOR = '#search, .main';
+const AI_SEND_SELECTORS = ['button[aria-label="Send"]', 'button[data-xid="input-plate-send-button"]', '.OEueve'];
 
 const streamHandlers = {
   onNewChunk: null,
@@ -1570,7 +1601,7 @@ async function ensureModel(page, modelKeywords) {
             '.model-selector', 
             'button[data-test-id="model-selector"]'
         ];
-        
+
         let modelBadge;
         for (const sel of modelBadgeSelectors) {
              modelBadge = await page.$(sel);
@@ -2213,6 +2244,143 @@ async function waitForAIResponseAndRender(page, initialCount) {
   }
 }
 
+async function sendPromptToAiMode(page, inputElement, promptText) {
+  const client = await getCdpSession(page);
+  try {
+    await page.evaluate((el) => {
+      if (!el) return;
+      try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
+      try { el.click(); } catch (e) {}
+      try { el.focus(); } catch (e) {}
+      const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+      if (isContentEditable) {
+        el.textContent = '';
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        range.collapse(false);
+        const selection = window.getSelection();
+        if (selection) {
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      } else {
+        el.value = '';
+        if (typeof el.setSelectionRange === 'function') {
+          el.setSelectionRange(0, 0);
+        } else {
+          el.selectionStart = 0;
+          el.selectionEnd = 0;
+        }
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, inputElement);
+  } catch (e) {}
+
+  let inserted = false;
+  if (client) {
+    try {
+      await client.send('Input.insertText', { text: promptText });
+      inserted = true;
+    } catch (e) {}
+  }
+
+  if (!inserted) {
+    try {
+      await page.evaluate((el, text) => {
+        if (!el) return;
+        const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+        if (isContentEditable) {
+          el.textContent = text;
+        } else {
+          el.value = text;
+        }
+      }, inputElement, promptText);
+    } catch (e) {}
+  }
+
+  try {
+    await page.evaluate((el, text) => {
+      if (!el) return;
+      const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+      const current = (isContentEditable ? (el.textContent || '') : (el.value || ''));
+      if (current.trim() !== text.trim()) {
+        if (isContentEditable) {
+          el.textContent = text;
+        } else {
+          el.value = text;
+        }
+      }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ', code: 'Space' }));
+      el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ' ', code: 'Space' }));
+    }, inputElement, promptText);
+  } catch (e) {}
+
+  await new Promise(r => setTimeout(r, 150));
+
+  let clickedSend = false;
+  try {
+    clickedSend = await page.evaluate((selectors) => {
+      const list = Array.isArray(selectors) ? selectors : [selectors];
+      const isVisible = (el) => {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect && rect.width > 0 && rect.height > 0;
+      };
+      let button = null;
+      for (const sel of list) {
+        const el = document.querySelector(sel);
+        if (el && isVisible(el)) {
+          button = el;
+          break;
+        }
+      }
+      if (!button) return false;
+      const disabledClasses = ['wdK4Nc', 'IbS5tc', 'Z3UdVc'];
+      disabledClasses.forEach((cls) => {
+        if (button.classList.contains(cls)) button.classList.remove(cls);
+      });
+      if (button.hasAttribute('disabled')) {
+        button.removeAttribute('disabled');
+      }
+      if (button.getAttribute('aria-disabled') === 'true') {
+        button.setAttribute('aria-disabled', 'false');
+      }
+      if (button.getAttribute('tabindex') === '-1') {
+        button.removeAttribute('tabindex');
+      }
+      button.click();
+      return true;
+    }, AI_SEND_SELECTORS);
+  } catch (e) {}
+
+  if (!clickedSend) {
+    let dispatched = false;
+    if (client) {
+      try {
+        await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
+        dispatched = true;
+      } catch (e) {}
+    }
+    if (!dispatched) {
+      try { await page.keyboard.press('Enter'); } catch (e) {}
+    }
+    try {
+      await page.evaluate((el) => {
+        if (!el) return;
+        const eventInit = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
+        el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+        el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+      }, inputElement);
+    } catch (e) {}
+  }
+}
+
 async function sendPromptToGemini(page, promptText) {
   // Enhanced selector list for the main chat input
   const inputSelectors = [
@@ -2282,61 +2450,51 @@ async function sendPromptToGemini(page, promptText) {
     let initialCount = 0;
     const selectorToCount = options.aiMode ? AI_RESPONSE_SELECTOR : RESPONSE_SELECTOR;
     const containerToCount = options.aiMode ? AI_RESPONSE_CONTAINER_SELECTOR : RESPONSE_CONTAINER_SELECTOR;
-    
+
     initialCount = await page.evaluate((responseSelector, responseContainerSelector) => {
         const allCandidates = Array.from(document.querySelectorAll(responseSelector));
         const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
         return (scopedCandidates.length ? scopedCandidates : allCandidates).length;
     }, selectorToCount, containerToCount);
-    
-    // Send prompt
-    if (promptText.length > 200) {
-        // Use clipboard paste for large text
-        await page.evaluate((text) => {
-            const data = new DataTransfer();
-            data.setData('text/plain', text);
-            const event = new ClipboardEvent('paste', {
-                clipboardData: data,
-                bubbles: true,
-                cancelable: true
-            });
-            document.activeElement.dispatchEvent(event);
-            
-            // Fallback if paste event doesn't trigger native insertion (often blocked)
-            // But for Gemini's rich text editor, we might need execCommand
-            if (document.activeElement.innerText.trim() === '') {
-                 document.execCommand('insertText', false, text);
-            }
-        }, promptText);
-    } else {
-        await page.keyboard.type(promptText);
-        
-        // Verify text was entered
-        const currentText = await page.evaluate(el => el.innerText, inputElement);
-        if (!currentText || currentText.trim() === '') {
-            // console.log(chalk.dim('Typing failed, forcing text insertion...'));
-            await page.evaluate((el, text) => {
-                el.focus();
-                document.execCommand('insertText', false, text);
-            }, inputElement, promptText);
-        }
-    }
-    
-    await new Promise(r => setTimeout(r, 300)); // Small delay for UI update
-    await page.keyboard.press('Enter');
 
-    // For AI Mode, Enter might not work for submission (multiline textarea), so we click Send
+    // Send prompt
     if (options.aiMode) {
-        try {
-            const sendSelectors = ['button[aria-label="Send"]', '.OEueve'];
-            for (const sel of sendSelectors) {
-                const btn = await page.$(sel);
-                if (btn) {
-                     await btn.click();
-                     break;
+        await sendPromptToAiMode(page, inputElement, promptText);
+    } else {
+        if (promptText.length > 200) {
+            // Use clipboard paste for large text
+            await page.evaluate((text) => {
+                const data = new DataTransfer();
+                data.setData('text/plain', text);
+                const event = new ClipboardEvent('paste', {
+                    clipboardData: data,
+                    bubbles: true,
+                    cancelable: true
+                });
+                document.activeElement.dispatchEvent(event);
+
+                // Fallback if paste event doesn't trigger native insertion (often blocked)
+                // But for Gemini's rich text editor, we might need execCommand
+                if (document.activeElement.innerText.trim() === '') {
+                     document.execCommand('insertText', false, text);
                 }
+            }, promptText);
+        } else {
+            await page.keyboard.type(promptText);
+
+            // Verify text was entered (check value for textarea, innerText for div)
+            const currentText = await page.evaluate(el => el.value || el.innerText, inputElement);
+            if (!currentText || currentText.trim() === '') {
+                // console.log(chalk.dim('Typing failed, forcing text insertion...'));
+                await page.evaluate((el, text) => {
+                    el.focus();
+                    document.execCommand('insertText', false, text);
+                }, inputElement, promptText);
             }
-        } catch(e) {}
+        }
+
+        await new Promise(r => setTimeout(r, 300)); // Small delay for UI update
+        await page.keyboard.press('Enter');
     }
 
     if (options.aiMode) {

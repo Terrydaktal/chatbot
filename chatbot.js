@@ -23,8 +23,12 @@ const OUTPUT_WIDTH = 88;
 const TABLE_COL_WIDTH = Math.max(12, Math.floor((OUTPUT_WIDTH - 10) / 3));
 const TYPING_FRAMES = ['●○○○', '○●○○', '○○●○', '○○○●'];
 const TYPING_INTERVAL_MS = 120;
-const LINE_STREAM_DELAY_MS = 20;
+const LINE_STREAM_DELAY_MS = 0;
 const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
+const AI_RESPONSE_POLL_INTERVAL_MS = 200;
+const AI_RESPONSE_STABLE_TICKS = 3;
+const AI_SUBMIT_CONFIRM_TIMEOUT_MS = 400;
+const AI_SUBMIT_CONFIRM_INTERVAL_MS = 80;
 
 function getRenderer() {
     const cols = process.stdout.columns || OUTPUT_WIDTH;
@@ -749,11 +753,11 @@ async function waitForResponseAndRender(page, initialCount) {
           stableCount = 0;
           lastLength = state.textLength;
         }
-        if (stableCount >= 6) break;
+        if (stableCount >= AI_RESPONSE_STABLE_TICKS) break;
       }
 
       if (Date.now() - start > 300000) break;
-      await new Promise(resolve => setTimeout(resolve, 500));
+      await new Promise(resolve => setTimeout(resolve, AI_RESPONSE_POLL_INTERVAL_MS));
     }
   } finally {
     clearInterval(keepAlive);
@@ -2299,7 +2303,7 @@ async function waitForAIResponseAndRender(page, initialCount) {
   }
 }
 
-async function sendPromptToAiMode(page, inputElement, promptText) {
+async function sendPromptToAiMode(page, inputElement, promptText, initialCount) {
   const client = await getCdpSession(page);
   try {
     await page.evaluate((el) => {
@@ -2373,47 +2377,90 @@ async function sendPromptToAiMode(page, inputElement, promptText) {
     }, inputElement, promptText);
   } catch (e) {}
 
-  await new Promise(r => setTimeout(r, 150));
+  await new Promise(r => setTimeout(r, 25));
 
-  let clickedSend = false;
-  try {
-    clickedSend = await page.evaluate((selectors) => {
-      const list = Array.isArray(selectors) ? selectors : [selectors];
-      const isVisible = (el) => {
-        if (!el) return false;
-        const style = window.getComputedStyle(el);
-        if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
-        const rect = el.getBoundingClientRect();
-        return rect && rect.width > 0 && rect.height > 0;
-      };
-      let button = null;
-      for (const sel of list) {
-        const el = document.querySelector(sel);
-        if (el && isVisible(el)) {
-          button = el;
-          break;
+  const baselineCount = Number.isFinite(initialCount) ? initialCount : null;
+  const confirmSubmitted = async () => {
+    return page.evaluate((el, baseline, responseSelector, responseContainerSelector, query) => {
+      const isContentEditable =
+        el && (el.isContentEditable || el.getAttribute('contenteditable') === 'true');
+      const current = el ? (isContentEditable ? (el.textContent || '') : (el.value || '')) : '';
+      const cleared = current.trim().length === 0;
+      const allCandidates = Array.from(document.querySelectorAll(responseSelector));
+      const scopedCandidates = allCandidates.filter(node => node.closest(responseContainerSelector));
+      const count = (scopedCandidates.length ? scopedCandidates : allCandidates).length;
+      if (typeof baseline === 'number' && count > baseline) return true;
+      if (cleared && query && query.trim().length > 0) return true;
+      return false;
+    }, inputElement, baselineCount, AI_RESPONSE_SELECTOR, AI_RESPONSE_CONTAINER_SELECTOR, promptText);
+  };
+
+  const tryClickSendButton = async () => {
+    let clicked = false;
+    let center = null;
+    try {
+      const info = await page.evaluate((selectors) => {
+        const list = Array.isArray(selectors) ? selectors : [selectors];
+        const isVisible = (el) => {
+          if (!el) return false;
+          const style = window.getComputedStyle(el);
+          if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
+          const rect = el.getBoundingClientRect();
+          return rect && rect.width > 0 && rect.height > 0;
+        };
+        let button = null;
+        for (const sel of list) {
+          const el = document.querySelector(sel);
+          if (el && isVisible(el)) {
+            button = el;
+            break;
+          }
         }
-      }
-      if (!button) return false;
-      const disabledClasses = ['wdK4Nc', 'IbS5tc', 'Z3UdVc'];
-      disabledClasses.forEach((cls) => {
-        if (button.classList.contains(cls)) button.classList.remove(cls);
-      });
-      if (button.hasAttribute('disabled')) {
-        button.removeAttribute('disabled');
-      }
-      if (button.getAttribute('aria-disabled') === 'true') {
-        button.setAttribute('aria-disabled', 'false');
-      }
-      if (button.getAttribute('tabindex') === '-1') {
-        button.removeAttribute('tabindex');
-      }
-      button.click();
-      return true;
-    }, AI_SEND_SELECTORS);
-  } catch (e) {}
+        if (!button) return { clicked: false, center: null };
+        const disabledClasses = ['wdK4Nc', 'IbS5tc', 'Z3UdVc'];
+        disabledClasses.forEach((cls) => {
+          if (button.classList.contains(cls)) button.classList.remove(cls);
+        });
+        if (button.hasAttribute('disabled')) {
+          button.removeAttribute('disabled');
+        }
+        if (button.getAttribute('aria-disabled') === 'true') {
+          button.setAttribute('aria-disabled', 'false');
+        }
+        if (button.getAttribute('tabindex') === '-1') {
+          button.removeAttribute('tabindex');
+        }
+        const rect = button.getBoundingClientRect();
+        const center = rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+        button.click();
+        return { clicked: true, center };
+      }, AI_SEND_SELECTORS);
+      clicked = Boolean(info && info.clicked);
+      center = info ? info.center : null;
+    } catch (e) {}
+    if (!clicked && center && client) {
+      try {
+        await client.send('Input.dispatchMouseEvent', {
+          type: 'mousePressed',
+          x: center.x,
+          y: center.y,
+          button: 'left',
+          clickCount: 1,
+        });
+        await client.send('Input.dispatchMouseEvent', {
+          type: 'mouseReleased',
+          x: center.x,
+          y: center.y,
+          button: 'left',
+          clickCount: 1,
+        });
+        clicked = true;
+      } catch (e) {}
+    }
+    return clicked;
+  };
 
-  if (!clickedSend) {
+  const dispatchEnter = async () => {
     let dispatched = false;
     if (client) {
       try {
@@ -2432,6 +2479,32 @@ async function sendPromptToAiMode(page, inputElement, promptText) {
         el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
         el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
       }, inputElement);
+    } catch (e) {}
+  };
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const clickedSend = await tryClickSendButton();
+    if (!clickedSend) {
+      await dispatchEnter();
+    }
+    const confirmStart = Date.now();
+    while (Date.now() - confirmStart < AI_SUBMIT_CONFIRM_TIMEOUT_MS) {
+      if (await confirmSubmitted()) return;
+      await new Promise(r => setTimeout(r, AI_SUBMIT_CONFIRM_INTERVAL_MS));
+    }
+    try {
+      await page.evaluate((el, text) => {
+        if (!el) return;
+        el.focus();
+        const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+        if (isContentEditable) {
+          el.textContent = text;
+        } else {
+          el.value = text;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }, inputElement, promptText);
     } catch (e) {}
   }
 }
@@ -2514,7 +2587,7 @@ async function sendPromptToGemini(page, promptText) {
 
     // Send prompt
     if (options.aiMode) {
-        await sendPromptToAiMode(page, inputElement, promptText);
+        await sendPromptToAiMode(page, inputElement, promptText, initialCount);
     } else {
         if (promptText.length > 200) {
             // Use clipboard paste for large text

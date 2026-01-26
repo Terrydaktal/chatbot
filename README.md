@@ -1,29 +1,27 @@
 # Gemini CLI Chatbot
 
-A powerful command-line interface for interacting with Google's Gemini (formerly Bard) via a controlled Chromium browser instance.
+A command-line interface for interacting with Google Gemini and Google AI Mode (Search) via a controlled Chromium browser session.
 
 ## Features
 
-- **Terminal-based Chat:** Full chat interface directly in your terminal.
-- **Markdown Rendering:** Beautifully renders Markdown responses with syntax highlighting.
-- **Persistent Session:** Uses a dedicated profile (`~/.config/chromium-chatbot`) to keep your session isolated and persistent.
-- **Streaming Responses:** See the response type out in real-time, just like on the web.
-- **Chat History & New Chat:** Access recent conversations or start a new one using the `/chats` command.
-- **Tools:** 
-    - **YouTube Transcripts:** Fetch video transcripts directly into the chat context using `#transcript <url>`.
-    - **Local File Inclusion:** Use `@include "filename"` to paste file contents into your prompt.
-- **Robustness:** 
-    - Works over **SSH** (requires X11 forwarding or access to desktop display).
-    - Prevents background throttling when the browser is minimized.
-    - Handles browser crashes and reloads gracefully.
+- **Gemini + AI Mode:** Use Gemini by default or Google AI Mode (Search) with `--ai-mode`.
+- **Terminal-first UI:** Full chat experience in the terminal with Markdown rendering and syntax highlighting.
+- **Persistent Session:** Dedicated profile (`~/.config/chromium-chatbot`) keeps you logged in and isolated.
+- **Fast Completion:** AI Mode finishes as soon as the UI footer appears and strips boilerplate text.
+- **Background-Friendly:** Prevents background throttling; works minimized/hidden on X11.
+- **Chat History & New Chat:** Switch chats or start a new one with `/chats`.
+- **Tools:**
+  - **YouTube Transcripts:** `#transcript <url>` pulls transcripts into your prompt.
+  - **Local File Inclusion:** `@include "filename"` inlines file content.
+- **Resilient Automation:** Handles reloads and recovers from stale sessions.
 
 ## Prerequisites
 
-- Node.js (v14 or higher)
+- Node.js (v18+ recommended)
 - Chromium or Google Chrome installed
-- `lsof` (for port checking)
-- `xdpyinfo` (for X server checking)
-- `yt-dlp` (optional, for transcript fetching; script handles local fallback)
+- `lsof` (port checking)
+- `xdpyinfo` (X server checking)
+- `yt-dlp` (optional; for transcript fetching)
 
 ## Installation
 
@@ -55,11 +53,22 @@ Use the provided helper script to launch the chatbot.
 ./chatbot
 ```
 
+Start in AI Mode (Google Search AI):
+
+```bash
+./chatbot --ai-mode
+```
+
 ### Options
 
+- `--ai-mode`: Use Google AI Mode (Search) instead of Gemini.
 - `--gemini-fast`: Force selection of the Gemini Flash model.
 - `--gemini-pro`: Force selection of the Gemini Pro/Advanced model.
+- `--gemini-flash`: Alias for `--gemini-fast`.
+- `--temp`: Use a temporary browser profile (no persistence).
+- `--port <number>`: Connect to an existing Chrome/Chromium remote-debugging port.
 - `--reload`: Force a complete restart of the browser process (useful if it freezes).
+- `--help`: Show CLI help.
 
 ### In-Chat Commands
 
@@ -83,9 +92,19 @@ Use the provided helper script to launch the chatbot.
   Refactor this code: @include "src/main.js"
   ```
 
+## Advanced: AI Mode Script
+
+There is a standalone script (`google-ai-mode.js`) for single-shot AI Mode queries and proxy/connection workflows.
+
+```bash
+node google-ai-mode.js --query "your question" --mode aimode
+```
+
+Use `--help` for all flags (connect to existing Chrome, reuse target, etc.).
+
 ## SSH Usage
 
-If running from SSH, you must ensure the script can access your desktop's X server (to launch the browser window on your remote screen) or use X11 forwarding.
+If running from SSH, ensure the script can access your desktop's X server (to launch the browser window on your remote screen) or use X11 forwarding.
 
 - **Remote Screen:** `export DISPLAY=:0` (The script attempts to auto-detect this).
 - **Forwarding:** Connect with `ssh -X user@host`.
@@ -94,6 +113,7 @@ If running from SSH, you must ensure the script can access your desktop's X serv
 
 - **Login issues:** If you get "This browser may not be secure", close everything and run `./chatbot-login` again.
 - **Transcript 429 Errors:** If fetching transcripts fails, the script automatically retries using browser cookies or different languages. Ensure `yt-dlp` is installed.
+- **AI Mode not sending:** Try `--reload` to restart the browser or make sure the window is not blocked by a modal.
 
 ## License
 

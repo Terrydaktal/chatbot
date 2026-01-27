@@ -1994,6 +1994,13 @@ async function startChatInterface(page, browser) {
       // Keep last line editable
       const lastLine = lines.pop() || '';
       
+      // Remove the echoed last line from terminal to prevent duplication.
+      // The 'line' event implies the terminal has already echoed the line and a newline.
+      if (lastLine && process.stdout.isTTY) {
+          process.stdout.moveCursor(0, -1);
+          process.stdout.clearLine(0);
+      }
+      
       if (!multilineMode) {
           enterMultilineMode(lines);
       } else {

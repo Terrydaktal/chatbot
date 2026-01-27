@@ -1721,6 +1721,7 @@ async function startChatInterface(page, browser) {
     let pendingStartedAt = 0;
     let pasteBuffer = '';
     let multilineMode = false;
+    let pasteInProgress = false;
     const defaultPrompt = chalk.bold.green('\nYou > ');
     const pastePrompt = chalk.bold.yellow('... ');
     const rawPasteDebounceMs = Number.parseInt(process.env.CHATBOT_PASTE_DEBOUNCE_MS || '250', 10);
@@ -1732,6 +1733,26 @@ async function startChatInterface(page, browser) {
       PASTE_DEBOUNCE_MS,
       Number.isFinite(rawPasteMaxWaitMs) && rawPasteMaxWaitMs > 0 ? rawPasteMaxWaitMs : 1500
     );
+    const setBracketedPaste = (enabled) => {
+      if (!process.stdout.isTTY) return;
+      process.stdout.write(enabled ? '\x1b[?2004h' : '\x1b[?2004l');
+    };
+
+    const stripBracketedPasteSequences = (value) => {
+      let out = value || '';
+      let sawStart = false;
+      let sawEnd = false;
+      if (out.includes('\x1b[200~')) {
+        sawStart = true;
+        out = out.replace(/\x1b\[200~/g, '');
+      }
+      if (out.includes('\x1b[201~')) {
+        sawEnd = true;
+        out = out.replace(/\x1b\[201~/g, '');
+      }
+      return { text: out, sawStart, sawEnd };
+    };
+
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -1750,6 +1771,8 @@ async function startChatInterface(page, browser) {
             rl.history = savedHistory.reverse();
         } catch (e) {}
     }
+
+    setBracketedPaste(true);
 
     rl.on('SIGINT', () => {
         // Pass to process listener
@@ -1997,6 +2020,10 @@ async function startChatInterface(page, browser) {
 
     const flushPendingLines = () => {
       if (!pendingLines.length) return;
+      if (pasteInProgress) {
+        pendingTimer = setTimeout(flushPendingLines, PASTE_DEBOUNCE_MS);
+        return;
+      }
       const now = Date.now();
       if (!multilineMode && pendingLines.length === 1 && hasBufferedInput()) {
         if (!pendingStartedAt) pendingStartedAt = now;
@@ -2058,10 +2085,17 @@ async function startChatInterface(page, browser) {
     
     readline.emitKeypressEvents(process.stdin);
     process.stdin.on('keypress', onKeypress);
-    rl.on('close', () => { process.stdin.removeListener('keypress', onKeypress); });
+    rl.on('close', () => {
+      process.stdin.removeListener('keypress', onKeypress);
+      setBracketedPaste(false);
+    });
 
     rl.on('line', async (line) => {
       if (isProcessing) return;
+      const pasteResult = stripBracketedPasteSequences(line);
+      if (pasteResult.sawStart) pasteInProgress = true;
+      if (pasteResult.sawEnd) pasteInProgress = false;
+      line = pasteResult.text;
 
       if (multilineMode) {
         if (line.trim() === '') {

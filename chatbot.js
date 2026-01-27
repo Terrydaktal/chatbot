@@ -1718,10 +1718,20 @@ async function startChatInterface(page, browser) {
     let isProcessing = false;
     let pendingLines = [];
     let pendingTimer = null;
+    let pendingStartedAt = 0;
     let pasteBuffer = '';
     let multilineMode = false;
     const defaultPrompt = chalk.bold.green('\nYou > ');
     const pastePrompt = chalk.bold.yellow('... ');
+    const rawPasteDebounceMs = Number.parseInt(process.env.CHATBOT_PASTE_DEBOUNCE_MS || '250', 10);
+    const rawPasteMaxWaitMs = Number.parseInt(process.env.CHATBOT_PASTE_MAX_WAIT_MS || '1500', 10);
+    const PASTE_DEBOUNCE_MS = Number.isFinite(rawPasteDebounceMs) && rawPasteDebounceMs > 0
+      ? rawPasteDebounceMs
+      : 250;
+    const PASTE_MAX_WAIT_MS = Math.max(
+      PASTE_DEBOUNCE_MS,
+      Number.isFinite(rawPasteMaxWaitMs) && rawPasteMaxWaitMs > 0 ? rawPasteMaxWaitMs : 1500
+    );
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -1980,11 +1990,25 @@ async function startChatInterface(page, browser) {
       rl.setPrompt(defaultPrompt);
     };
 
+    const hasBufferedInput = () => {
+      if (typeof process.stdin.readableLength !== 'number') return false;
+      return process.stdin.readableLength > 0;
+    };
+
     const flushPendingLines = () => {
       if (!pendingLines.length) return;
+      const now = Date.now();
+      if (!multilineMode && pendingLines.length === 1 && hasBufferedInput()) {
+        if (!pendingStartedAt) pendingStartedAt = now;
+        if (now - pendingStartedAt < PASTE_MAX_WAIT_MS) {
+          pendingTimer = setTimeout(flushPendingLines, PASTE_DEBOUNCE_MS);
+          return;
+        }
+      }
       const lines = pendingLines;
       pendingLines = [];
       pendingTimer = null;
+      pendingStartedAt = 0;
       
       if (!multilineMode && lines.length === 1) {
         void handleInput(lines[0]);
@@ -2051,9 +2075,10 @@ async function startChatInterface(page, browser) {
         return;
       }
 
+      if (!pendingLines.length) pendingStartedAt = Date.now();
       pendingLines.push(line);
       if (pendingTimer) clearTimeout(pendingTimer);
-      pendingTimer = setTimeout(flushPendingLines, 80);
+      pendingTimer = setTimeout(flushPendingLines, PASTE_DEBOUNCE_MS);
     });
   };
 

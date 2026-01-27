@@ -1722,6 +1722,8 @@ async function startChatInterface(page, browser) {
     let pasteBuffer = '';
     let multilineMode = false;
     let pasteInProgress = false;
+    let suppressOutput = false;
+    let suppressedOutputActive = false;
     const defaultPrompt = chalk.bold.green('\nYou > ');
     const pastePrompt = chalk.bold.yellow('... ');
     const rawPasteDebounceMs = Number.parseInt(process.env.CHATBOT_PASTE_DEBOUNCE_MS || '250', 10);
@@ -1759,6 +1761,16 @@ async function startChatInterface(page, browser) {
       prompt: defaultPrompt,
       historySize: 1000
     });
+    const originalWriteToOutput = typeof rl._writeToOutput === 'function' ? rl._writeToOutput.bind(rl) : null;
+    if (originalWriteToOutput) {
+      rl._writeToOutput = (stringToWrite) => {
+        if (suppressOutput) {
+          suppressedOutputActive = true;
+          return;
+        }
+        originalWriteToOutput(stringToWrite);
+      };
+    }
 
     // Load history
     if (fs.existsSync(HISTORY_FILE)) {
@@ -2047,9 +2059,13 @@ async function startChatInterface(page, browser) {
       
       // Remove the echoed last line from terminal to prevent duplication.
       // The 'line' event implies the terminal has already echoed the line and a newline.
-      if (lastLine && process.stdout.isTTY) {
+      if (lastLine && process.stdout.isTTY && !suppressedOutputActive) {
           process.stdout.moveCursor(0, -1);
           process.stdout.clearLine(0);
+      }
+      if (suppressedOutputActive && process.stdout.isTTY) {
+          process.stdout.clearLine(0);
+          process.stdout.cursorTo(0);
       }
       
       if (!multilineMode) {
@@ -2063,6 +2079,7 @@ async function startChatInterface(page, browser) {
       if (lastLine) {
           rl.write(lastLine);
       }
+      suppressedOutputActive = false;
     };
 
     const onKeypress = (str, key) => {
@@ -2083,18 +2100,39 @@ async function startChatInterface(page, browser) {
         }
     };
     
+    const onPasteData = (chunk) => {
+      const text = chunk.toString('utf8');
+      if (text.includes('\x1b[200~')) {
+        pasteInProgress = true;
+        suppressOutput = true;
+      }
+      if (text.includes('\x1b[201~')) {
+        pasteInProgress = false;
+        suppressOutput = false;
+      }
+    };
+
     readline.emitKeypressEvents(process.stdin);
     process.stdin.on('keypress', onKeypress);
+    process.stdin.on('data', onPasteData);
     rl.on('close', () => {
       process.stdin.removeListener('keypress', onKeypress);
+      process.stdin.removeListener('data', onPasteData);
+      if (originalWriteToOutput) rl._writeToOutput = originalWriteToOutput;
       setBracketedPaste(false);
     });
 
     rl.on('line', async (line) => {
       if (isProcessing) return;
       const pasteResult = stripBracketedPasteSequences(line);
-      if (pasteResult.sawStart) pasteInProgress = true;
-      if (pasteResult.sawEnd) pasteInProgress = false;
+      if (pasteResult.sawStart) {
+        pasteInProgress = true;
+        suppressOutput = true;
+      }
+      if (pasteResult.sawEnd) {
+        pasteInProgress = false;
+        suppressOutput = false;
+      }
       line = pasteResult.text;
 
       if (multilineMode) {

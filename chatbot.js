@@ -23,7 +23,7 @@ const OUTPUT_WIDTH = 88;
 const TABLE_COL_WIDTH = Math.max(12, Math.floor((OUTPUT_WIDTH - 10) / 3));
 const TYPING_FRAMES = ['●○○○', '○●○○', '○○●○', '○○○●'];
 const TYPING_INTERVAL_MS = 120;
-const LINE_STREAM_DELAY_MS = 0;
+const LINE_STREAM_DELAY_MS = 35;
 const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
 const AI_RESPONSE_POLL_INTERVAL_MS = 150;
 const AI_RESPONSE_STABLE_TICKS = 2;

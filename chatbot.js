@@ -1985,28 +1985,41 @@ async function startChatInterface(page, browser) {
       const lines = pendingLines;
       pendingLines = [];
       pendingTimer = null;
-      if (lines.length === 1) {
+      
+      if (!multilineMode && lines.length === 1) {
         void handleInput(lines[0]);
         return;
       }
-      enterMultilineMode(lines);
+      
+      // Keep last line editable
+      const lastLine = lines.pop() || '';
+      
+      if (!multilineMode) {
+          enterMultilineMode(lines);
+      } else {
+          if (lines.length) {
+              pasteBuffer = pasteBuffer ? pasteBuffer + '\n' + lines.join('\n') : lines.join('\n');
+          }
+      }
+      
+      if (lastLine) {
+          rl.write(lastLine);
+      }
     };
 
     const onKeypress = (str, key) => {
         if (!multilineMode || !key) return;
-        if ((key.name === 'backspace' || key.name === 'up') && rl.line.length === 0) {
+        
+        const isBackNav = key.name === 'backspace' || key.name === 'up' || key.name === 'left';
+        
+        // Allow navigating back to previous lines if at start of current line
+        if (isBackNav && rl.cursor === 0) {
             if (pasteBuffer.length > 0) {
                 const lines = pasteBuffer.split('\n');
                 const lastLine = lines.pop();
                 pasteBuffer = lines.join('\n');
-                if (pasteBuffer.length === 0) {
-                    multilineMode = false;
-                    rl.setPrompt(defaultPrompt);
-                    if (savedHistory.length) rl.history = savedHistory;
-                } else {
-                    rl.setPrompt(pastePrompt);
-                }
-                rl.prompt(true); 
+                
+                // Insert previous line at cursor 0, merging it with current line
                 rl.write(lastLine);
             }
         }

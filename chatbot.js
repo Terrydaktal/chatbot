@@ -2034,6 +2034,24 @@ async function startChatInterface(page, browser) {
       return process.stdin.readableLength > 0;
     };
 
+    const clearWrappedLines = (text) => {
+      if (!process.stdout.isTTY) return;
+      const cols = process.stdout.columns || OUTPUT_WIDTH;
+      const rows = Math.max(1, Math.ceil(stripAnsi(text || '').length / cols));
+      if (rows > 1) {
+        process.stdout.write(`\x1b[${rows}A`);
+      } else {
+        process.stdout.write('\x1b[1A');
+      }
+      for (let i = 0; i < rows; i++) {
+        process.stdout.write('\r\x1b[2K');
+        if (i < rows - 1) process.stdout.write('\x1b[1B');
+      }
+      if (rows > 1) {
+        process.stdout.write(`\x1b[${rows - 1}A`);
+      }
+    };
+
     const flushPendingLines = () => {
       if (!pendingLines.length) return;
       if (pasteInProgress) {
@@ -2064,8 +2082,7 @@ async function startChatInterface(page, browser) {
       // Remove the echoed last line from terminal to prevent duplication.
       // The 'line' event implies the terminal has already echoed the line and a newline.
       if (lastLine && process.stdout.isTTY && !suppressedOutputActive) {
-          process.stdout.moveCursor(0, -1);
-          process.stdout.clearLine(0);
+          clearWrappedLines(lastLine);
       }
       if (suppressedOutputActive && process.stdout.isTTY) {
           process.stdout.clearLine(0);

@@ -30,12 +30,13 @@ const AI_RESPONSE_STABLE_TICKS = 2;
 const AI_SUBMIT_CONFIRM_TIMEOUT_MS = 400;
 const AI_SUBMIT_CONFIRM_INTERVAL_MS = 80;
 
-function getRenderer() {
+function getRenderer(opts = {}) {
     const cols = process.stdout.columns || OUTPUT_WIDTH;
+    const reflow = opts.reflowText !== false;
     
-    const r = new TerminalRenderer({
-      width: cols - 4, // Safety margin
-      reflowText: true,
+    const rendererConfig = {
+      width: reflow ? cols - 4 : 10000, // Safety margin or large width
+      reflowText: reflow,
       showSectionPrefix: false,
       tab: 4, 
       heading: chalk.bold.blue,
@@ -44,37 +45,42 @@ function getRenderer() {
       em: chalk.italic,
       blockquote: chalk.gray.italic,
       code: chalk.yellow,
-      listitem: (text) => {
-          // We override listitem to ensure proper hanging indents and wrapping that
-          // marked-terminal's default reflow sometimes misses on nested lists.
-          
-          const padding = '  '; // Align with the default bullet that marked-terminal adds (* )
-          
-          // Get current terminal width
-          const cols = process.stdout.columns || OUTPUT_WIDTH;
-          
-          // Calculate safe wrap width. 
-          // We subtract 12 chars to account for:
-          // - Global margins (4)
-          // - Potential nesting indentation (e.g. 2 levels * 2 spaces = 4)
-          // - The bullet itself (2)
-          const wrapWidth = Math.max(20, cols - 12);
-
-          // Flatten text to single line to remove existing random newlines
-          const cleanText = text.replace(/\s+/g, ' ').trim();
-
-          // Hard wrap at the calculated width
-          const wrapped = wrapAnsi(cleanText, wrapWidth, { trim: false, hard: true });
-          
-          // Indent lines after the first one to create the hanging indent
-          return wrapped.replace(/\n/g, '\n' + padding) + '\n';
-      },
       tableOptions: {
-        wordWrap: true,
+        wordWrap: reflow,
         // Removed fixed colWidths to allow auto-sizing based on content
         style: { head: [], border: [] }
       }
-    });
+    };
+
+    if (reflow) {
+        rendererConfig.listitem = (text) => {
+            // We override listitem to ensure proper hanging indents and wrapping that
+            // marked-terminal's default reflow sometimes misses on nested lists.
+            
+            const padding = '  '; // Align with the default bullet that marked-terminal adds (* )
+            
+            // Get current terminal width
+            const cols = process.stdout.columns || OUTPUT_WIDTH;
+            
+            // Calculate safe wrap width. 
+            // We subtract 12 chars to account for:
+            // - Global margins (4)
+            // - Potential nesting indentation (e.g. 2 levels * 2 spaces = 4)
+            // - The bullet itself (2)
+            const wrapWidth = Math.max(20, cols - 12);
+
+            // Flatten text to single line to remove existing random newlines
+            const cleanText = text.replace(/\s+/g, ' ').trim();
+
+            // Hard wrap at the calculated width
+            const wrapped = wrapAnsi(cleanText, wrapWidth, { trim: false, hard: true });
+            
+            // Indent lines after the first one to create the hanging indent
+            return wrapped.replace(/\n/g, '\n' + padding) + '\n';
+        };
+    }
+    
+    const r = new TerminalRenderer(rendererConfig);
     
     r.hr = function () { return '\n\n'; };
     
@@ -90,8 +96,8 @@ function getRenderer() {
     return r;
 }
 
-function renderMarkdown(text) {
-    return marked(text, { renderer: getRenderer() });
+function renderMarkdown(text, opts = {}) {
+    return marked(text, { renderer: getRenderer(opts) });
 }
 
 let globalBrowser = null;
@@ -703,7 +709,7 @@ async function applyLifecycleOverrides(page) {
   } catch(e) {}
 }
 
-async function waitForResponseAndRender(page, initialCount) {
+async function waitForResponseAndRender(page, initialCount, isOneSentenceMode = false) {
   const status = startStatusAnimation('Gemini is thinking');
   activeStopTyping = status.stop;
   
@@ -777,7 +783,7 @@ async function waitForResponseAndRender(page, initialCount) {
   }
 
   finalText = normalizeMarkdown(finalText || '');
-  const rendered = renderMarkdown(finalText);
+  const rendered = renderMarkdown(finalText, { reflowText: !isOneSentenceMode });
   const lines = rendered.split('\n');
 
   for (let i = 0; i < lines.length; i++) {
@@ -1854,9 +1860,11 @@ async function startChatInterface(page, browser) {
 
       if (input) {
         let finalPrompt = rawInput;
+        let isOneSentenceMode = false;
         
         // Replace leading ~ with "answer in one sentence: "
         if (finalPrompt.startsWith('~')) {
+            isOneSentenceMode = true;
             finalPrompt = 'answer in one sentence: ' + finalPrompt.substring(1);
         }
         
@@ -1948,7 +1956,7 @@ async function startChatInterface(page, browser) {
         }
 
         isProcessing = true;
-        await sendPromptToGemini(page, finalPrompt);
+        await sendPromptToGemini(page, finalPrompt, isOneSentenceMode);
         isProcessing = false;
       }
       rl.prompt();
@@ -2283,7 +2291,7 @@ async function fetchCopyMarkdownAI(page) {
   }
 }
 
-async function waitForAIResponseAndRender(page, initialCount) {
+async function waitForAIResponseAndRender(page, initialCount, isOneSentenceMode = false) {
   const status = startStatusAnimation('Google AI is thinking');
   activeStopTyping = status.stop;
   
@@ -2375,7 +2383,7 @@ async function waitForAIResponseAndRender(page, initialCount) {
   }
 
   finalText = normalizeMarkdown(finalText || '');
-  const rendered = renderMarkdown(finalText);
+  const rendered = renderMarkdown(finalText, { reflowText: !isOneSentenceMode });
   const lines = rendered.split('\n');
 
   for (let i = 0; i < lines.length; i++) {
@@ -2640,7 +2648,7 @@ async function findVisibleInput(page, selectors, preferAiMode, timeoutMs = 1500)
   return element;
 }
 
-async function sendPromptToGemini(page, promptText) {
+async function sendPromptToGemini(page, promptText, isOneSentenceMode = false) {
   // Enhanced selector list for the main chat input
   const inputSelectors = [
       '.ITIRGe',
@@ -2743,9 +2751,9 @@ async function sendPromptToGemini(page, promptText) {
     }
 
     if (options.aiMode) {
-        await waitForAIResponseAndRender(page, initialCount);
+        await waitForAIResponseAndRender(page, initialCount, isOneSentenceMode);
     } else {
-        await waitForResponseAndRender(page, initialCount);
+        await waitForResponseAndRender(page, initialCount, isOneSentenceMode);
     }
 
   } catch (error) {

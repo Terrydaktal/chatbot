@@ -1962,9 +1962,13 @@ async function startChatInterface(page, browser) {
       rl.prompt();
     };
 
+    let savedHistory = [];
+
     const enterMultilineMode = (lines) => {
       pasteBuffer = lines.join('\n');
       multilineMode = true;
+      savedHistory = rl.history;
+      rl.history = [];
       rl.setPrompt(pastePrompt);
       rl.prompt();
     };
@@ -1972,6 +1976,7 @@ async function startChatInterface(page, browser) {
     const exitMultilineMode = () => {
       pasteBuffer = '';
       multilineMode = false;
+      if (savedHistory.length) rl.history = savedHistory;
       rl.setPrompt(defaultPrompt);
     };
 
@@ -1986,6 +1991,30 @@ async function startChatInterface(page, browser) {
       }
       enterMultilineMode(lines);
     };
+
+    const onKeypress = (str, key) => {
+        if (!multilineMode || !key) return;
+        if ((key.name === 'backspace' || key.name === 'up') && rl.line.length === 0) {
+            if (pasteBuffer.length > 0) {
+                const lines = pasteBuffer.split('\n');
+                const lastLine = lines.pop();
+                pasteBuffer = lines.join('\n');
+                if (pasteBuffer.length === 0) {
+                    multilineMode = false;
+                    rl.setPrompt(defaultPrompt);
+                    if (savedHistory.length) rl.history = savedHistory;
+                } else {
+                    rl.setPrompt(pastePrompt);
+                }
+                rl.prompt(true); 
+                rl.write(lastLine);
+            }
+        }
+    };
+    
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.on('keypress', onKeypress);
+    rl.on('close', () => { process.stdin.removeListener('keypress', onKeypress); });
 
     rl.on('line', async (line) => {
       if (isProcessing) return;

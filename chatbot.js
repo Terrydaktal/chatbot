@@ -1725,7 +1725,11 @@ async function startChatInterface(page, browser) {
     let suppressOutput = false;
     let suppressedOutputActive = false;
     const defaultPrompt = chalk.bold.green('\nYou > ');
-    const pastePrompt = chalk.bold.yellow('... ');
+    const rawPastePrompt = process.env.CHATBOT_PASTE_PROMPT;
+    const pastePrompt = rawPastePrompt !== undefined
+      ? rawPastePrompt
+      : '';
+    const pastePromptRendered = pastePrompt ? chalk.bold.yellow(pastePrompt) : '';
     const rawPasteDebounceMs = Number.parseInt(process.env.CHATBOT_PASTE_DEBOUNCE_MS || '250', 10);
     const rawPasteMaxWaitMs = Number.parseInt(process.env.CHATBOT_PASTE_MAX_WAIT_MS || '1500', 10);
     const PASTE_DEBOUNCE_MS = Number.isFinite(rawPasteDebounceMs) && rawPasteDebounceMs > 0
@@ -2014,7 +2018,7 @@ async function startChatInterface(page, browser) {
       multilineMode = true;
       savedHistory = rl.history;
       rl.history = [];
-      rl.setPrompt(pastePrompt);
+      rl.setPrompt(pastePromptRendered);
       rl.prompt();
     };
 

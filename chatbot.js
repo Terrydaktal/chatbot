@@ -2157,6 +2157,15 @@ async function startChatInterface(page, browser) {
         suppressOutput = false;
       }
       line = pasteResult.text;
+      const isBracketedPaste = pasteInProgress || pasteResult.sawStart || pasteResult.sawEnd;
+
+      if (multilineMode && isBracketedPaste) {
+        if (!pendingLines.length) pendingStartedAt = Date.now();
+        pendingLines.push(line);
+        if (pendingTimer) clearTimeout(pendingTimer);
+        pendingTimer = setTimeout(flushPendingLines, PASTE_DEBOUNCE_MS);
+        return;
+      }
 
       if (multilineMode) {
         if (line.trim() === '') {

@@ -1714,480 +1714,461 @@ async function ensureModel(page, modelKeywords) {
 }
 
 async function startChatInterface(page, browser) {
-  const runLoop = () => {
-    let isProcessing = false;
-    let pendingLines = [];
-    let pendingTimer = null;
-    let pendingStartedAt = 0;
-    let pasteBuffer = '';
-    let multilineMode = false;
-    let pasteInProgress = false;
-    let suppressOutput = false;
-    let suppressedOutputActive = false;
-    const defaultPrompt = chalk.bold.green('\nYou > ');
-    const rawPastePrompt = process.env.CHATBOT_PASTE_PROMPT;
-    const pastePrompt = rawPastePrompt !== undefined
-      ? rawPastePrompt
-      : '';
-    const pastePromptRendered = pastePrompt ? chalk.bold.yellow(pastePrompt) : '';
-    const rawPasteDebounceMs = Number.parseInt(process.env.CHATBOT_PASTE_DEBOUNCE_MS || '250', 10);
-    const rawPasteMaxWaitMs = Number.parseInt(process.env.CHATBOT_PASTE_MAX_WAIT_MS || '1500', 10);
-    const PASTE_DEBOUNCE_MS = Number.isFinite(rawPasteDebounceMs) && rawPasteDebounceMs > 0
-      ? rawPasteDebounceMs
-      : 250;
-    const PASTE_MAX_WAIT_MS = Math.max(
-      PASTE_DEBOUNCE_MS,
-      Number.isFinite(rawPasteMaxWaitMs) && rawPasteMaxWaitMs > 0 ? rawPasteMaxWaitMs : 1500
-    );
-    const setBracketedPaste = (enabled) => {
-      if (!process.stdout.isTTY) return;
-      process.stdout.write(enabled ? '\x1b[?2004h' : '\x1b[?2004l');
-    };
+  // Raw-mode multiline composer:
+  // - Enter submits (outside paste mode)
+  // - Bracketed paste preserves embedded newlines (does NOT auto-submit)
+  // - Full buffer always visible (no collapse-to-last-line readline workaround)
 
-    const stripBracketedPasteSequences = (value) => {
-      let out = value || '';
-      let sawStart = false;
-      let sawEnd = false;
-      if (out.includes('\x1b[200~')) {
-        sawStart = true;
-        out = out.replace(/\x1b\[200~/g, '');
-      }
-      if (out.includes('\x1b[201~')) {
-        sawEnd = true;
-        out = out.replace(/\x1b\[201~/g, '');
-      }
-      return { text: out, sawStart, sawEnd };
-    };
+  const stdin = process.stdin;
+  const stdout = process.stdout;
 
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
-      prompt: defaultPrompt,
-      historySize: 1000
-    });
-    const originalWriteToOutput = typeof rl._writeToOutput === 'function' ? rl._writeToOutput.bind(rl) : null;
-    if (originalWriteToOutput) {
-      rl._writeToOutput = (stringToWrite) => {
-        if (suppressOutput) {
-          suppressedOutputActive = true;
-          return;
-        }
-        originalWriteToOutput(stringToWrite);
-      };
-    }
+  if (!stdin.isTTY || !stdout.isTTY) {
+    console.log(chalk.red('ERROR: Interactive TTY required for the chat interface.'));
+    process.exit(1);
+  }
 
-    // Load history
-    if (fs.existsSync(HISTORY_FILE)) {
-        try {
-            // Read lines, filter empty, and reverse because rl.history expects [newest, ..., oldest]
-            const savedHistory = fs.readFileSync(HISTORY_FILE, 'utf8')
-                .split('\n')
-                .map(l => l.trim())
-                .filter(Boolean);
-            rl.history = savedHistory.reverse();
-        } catch (e) {}
-    }
+  const promptAnsi = chalk.bold.green('You > ');
+  const promptPlainLen = stripAnsi(promptAnsi).length;
+  const contIndent = ' '.repeat(promptPlainLen);
 
-    setBracketedPaste(true);
-
-    rl.on('SIGINT', () => {
-        // Pass to process listener
-        process.emit('SIGINT');
-    });
-
-    rl.prompt();
-
-    const handleInput = async (line) => {
-      if (isProcessing) return;
-      const rawInput = line;
-      const input = rawInput.trim();
-      
-      if (input) {
-          // Save to persistent history file
-          fs.appendFileSync(HISTORY_FILE, input + '\n');
-      }
-
-      if (input.toLowerCase() === 'exit' || input.toLowerCase() === 'quit') {
-        rl.close();
-        console.log(chalk.blue('Exiting CLI. Browser session remains open for reuse.'));
-        browser.disconnect();
-        process.exit(0);
-      }
-
-      if (input.toLowerCase() === '/chats') {
-        rl.close(); // Close RL to free up stdin for raw mode
-        
-        const chats = await fetchRecentChats(page);
-        
-        // Add "New Chat" option at the beginning
-        chats.unshift({ title: chalk.bold.green('+ New Chat'), isNewChat: true });
-
-        if (!chats.length) {
-          console.log(chalk.yellow('No recent chats found in the sidebar.'));
-        } else {
-          const selected = await selectChatFromList(chats);
-          if (selected) {
-            if (selected.isNewChat) {
-                console.log(chalk.cyan('\nStarting new chat...'));
-                await page.goto(GEMINI_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-            } else {
-                console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
-                
-                if (selected.clickIndex >= 0) {
-                     console.log(chalk.dim('Clicking chat item in sidebar...'));
-                     try {
-                         await page.evaluate((index) => {
-                             const items = document.querySelectorAll('[data-test-id="conversation"]');
-                             if (items[index]) items[index].click();
-                         }, selected.clickIndex);
-                         
-                         // Wait for some network activity or DOM change
-                         try {
-                             await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 });
-                         } catch(e) { /* ignore timeout */ }
-                         
-                     } catch (e) {
-                         console.error(chalk.red('Failed to click chat item:'), e.message);
-                     }
-                } else {
-                    const targetUrl = selected.href
-                      ? new URL(selected.href, GEMINI_URL).toString()
-                      : GEMINI_URL;
-                    console.log(chalk.dim(`Navigating to: ${targetUrl}`)); // Debug log
-                    await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-                }
-            }
-
-            // Wait for input first (basic app load)
-            await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
-            
-            if (!selected.isNewChat) {
-                // Try to wait for any message content to appear, to avoid premature "No messages"
-                try {
-                    await page.waitForSelector('user-message, response-container, .message-content', { timeout: 5000 });
-                } catch (e) {
-                    // It's okay if this times out (e.g. empty new chat), we'll check manually next
-                }
-            }
-
-            await applyVisibilityOverride(page);
-            await applyLifecycleOverrides(page);
-
-            if (!selected.isNewChat) {
-                let history = await fetchConversationMessages(page);
-                
-                // Retry once if empty, in case of slow hydration
-                if (!history.length) {
-                    console.log(chalk.dim('Waiting for messages to render...'));
-                    await new Promise(r => setTimeout(r, 3000));
-                    history = await fetchConversationMessages(page);
-                }
-
-                if (!history.length) {
-                  console.log(chalk.yellow('No messages found in this chat.'));
-                } else {
-                  console.log(chalk.magenta('\nChat history:\n'));
-                  for (const msg of history) {
-                    if (msg.role === 'user') {
-                      console.log(chalk.bold.green('You > ') + msg.text);
-                    } else {
-                      console.log(chalk.bold.cyan('Gemini > '));
-                      const rendered = renderMarkdown(normalizeMarkdown(msg.text || ''));
-                      console.log(rendered.trimEnd());
-                    }
-                    console.log('');
-                  }
-                }
-            }
-          }
-        }
-        
-        // Restart loop
-        runLoop();
-        return;
-      }
-
-      if (input) {
-        let finalPrompt = rawInput;
-        let isOneSentenceMode = false;
-        
-        // Replace leading ~ with "answer in one sentence: "
-        if (finalPrompt.startsWith('~')) {
-            isOneSentenceMode = true;
-            finalPrompt = 'answer in one sentence: ' + finalPrompt.substring(1);
-        }
-        
-        // Handle @include expansion
-        const includeRegex = /@include\s+("([^"]+)"|'([^']+)'|([^\s]+))/g;
-        let match;
-        let expansionError = false;
-
-        // Collect replacements first to avoid issues with regex index when modifying string
-        const replacements = [];
-        
-        while ((match = includeRegex.exec(rawInput)) !== null) {
-            const fullMatch = match[0];
-            const filePath = match[2] || match[3] || match[4];
-            
-            try {
-                const absolutePath = path.resolve(process.cwd(), filePath);
-                if (fs.existsSync(absolutePath)) {
-                    const content = fs.readFileSync(absolutePath, 'utf8');
-                    replacements.push({ 
-                        original: fullMatch, 
-                        content: `\n\n--- Start of ${path.basename(filePath)} ---\n${content}\n--- End of ${path.basename(filePath)} ---\n` 
-                    });
-                } else {
-                    console.log(chalk.red(`Error: File not found: ${filePath}`));
-                    expansionError = true;
-                }
-            } catch (err) {
-                console.log(chalk.red(`Error reading file ${filePath}: ${err.message}`));
-                expansionError = true;
-            }
-        }
-
-        // Handle #transcript expansion
-        // Supports flags: #transcript --all --lang "ru" <url>
-        const transcriptRegex = /#transcript\s+(?:(.+?)\s+)?(https?:\/\/[^\s]+)/g;
-        while ((match = transcriptRegex.exec(rawInput)) !== null) {
-            const fullMatch = match[0];
-            const flags = match[1] || ''; // e.g. "--all --lang \"ru\""
-            const url = match[2];
-
-            // Validate YouTube URL
-            const ytRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$/;
-            if (!ytRegex.test(url)) {
-                console.log(chalk.red(`Error: Invalid YouTube URL: ${url}`));
-                expansionError = true;
-                continue;
-            }
-
-            try {
-                console.log(chalk.cyan(`Fetching transcript for: ${url} ${flags ? `(${flags})` : ''}...`));
-                const transcriptPath = path.resolve(__dirname, 'transcript');
-                
-                // Construct command
-                const cmd = flags ? `"${transcriptPath}" ${flags} "${url}"` : `"${transcriptPath}" "${url}"`;
-                
-                const output = execSync(cmd, { encoding: 'utf8' }).trim();
-                
-                let expansion = `\n\n--- Transcript for YouTube video ---\n`;
-                if (flags.includes('--all')) {
-                    try {
-                        const data = JSON.parse(output);
-                        if (data.title) expansion += `Title: ${data.title}\n`;
-                        if (data.description) expansion += `Description: ${data.description}\n`;
-                        expansion += `Transcript: ${data.transcript}\n`;
-                    } catch(e) {
-                        expansion += `Transcript: ${output}\n`;
-                    }
-                } else {
-                    expansion += `Transcript: ${output}\n`;
-                }
-                expansion += `--- End of Transcript ---\n`;
-                
-                replacements.push({ original: fullMatch, content: expansion });
-            } catch (err) {
-                console.log(chalk.red(`Error fetching transcript for ${url}: ${err.message}`));
-                expansionError = true;
-            }
-        }
-
-
-        if (expansionError) {
-             rl.prompt();
-             return;
-        }
-
-        for (const rep of replacements) {
-            finalPrompt = finalPrompt.replace(rep.original, rep.content);
-        }
-
-        isProcessing = true;
-        await sendPromptToGemini(page, finalPrompt, isOneSentenceMode);
-        isProcessing = false;
-      }
-      rl.prompt();
-    };
-
-    let savedHistory = [];
-
-    const enterMultilineMode = (lines) => {
-      pasteBuffer = lines.join('\n');
-      multilineMode = true;
-      savedHistory = rl.history;
-      rl.history = [];
-      rl.setPrompt(pastePromptRendered);
-      rl.prompt();
-    };
-
-    const exitMultilineMode = () => {
-      pasteBuffer = '';
-      multilineMode = false;
-      if (savedHistory.length) rl.history = savedHistory;
-      rl.setPrompt(defaultPrompt);
-    };
-
-    const hasBufferedInput = () => {
-      if (typeof process.stdin.readableLength !== 'number') return false;
-      return process.stdin.readableLength > 0;
-    };
-
-    const clearWrappedLinesBlock = (lines) => {
-      if (!process.stdout.isTTY || !lines.length) return;
-      const cols = process.stdout.columns || OUTPUT_WIDTH;
-      const rows = lines.map(line => Math.max(1, Math.ceil(stripAnsi(line || '').length / cols)));
-      const totalRows = rows.reduce((sum, count) => sum + count, 0);
-      if (totalRows > 1) {
-        process.stdout.write(`\x1b[${totalRows}A`);
-      } else {
-        process.stdout.write('\x1b[1A');
-      }
-      for (let i = 0; i < totalRows; i++) {
-        process.stdout.write('\r\x1b[2K');
-        if (i < totalRows - 1) process.stdout.write('\x1b[1B');
-      }
-      if (totalRows > 1) {
-        process.stdout.write(`\x1b[${totalRows - 1}A`);
-      }
-    };
-
-    const flushPendingLines = () => {
-      if (!pendingLines.length) return;
-      if (pasteInProgress) {
-        pendingTimer = setTimeout(flushPendingLines, PASTE_DEBOUNCE_MS);
-        return;
-      }
-      const now = Date.now();
-      if (!multilineMode && pendingLines.length === 1 && hasBufferedInput()) {
-        if (!pendingStartedAt) pendingStartedAt = now;
-        if (now - pendingStartedAt < PASTE_MAX_WAIT_MS) {
-          pendingTimer = setTimeout(flushPendingLines, PASTE_DEBOUNCE_MS);
-          return;
-        }
-      }
-      const lines = pendingLines;
-      const allLines = lines.slice();
-      pendingLines = [];
-      pendingTimer = null;
-      pendingStartedAt = 0;
-      
-      if (!multilineMode && lines.length === 1) {
-        void handleInput(lines[0]);
-        return;
-      }
-      
-      // Keep last line editable
-      const lastLine = lines.pop() || '';
-      
-      // Remove the echoed paste block from terminal to prevent uneditable copies.
-      // The 'line' event implies the terminal has already echoed the lines and newlines.
-      if (process.stdout.isTTY && !suppressedOutputActive && allLines.length) {
-          clearWrappedLinesBlock(allLines);
-      }
-      if (suppressedOutputActive && process.stdout.isTTY) {
-          process.stdout.clearLine(0);
-          process.stdout.cursorTo(0);
-      }
-      
-      if (!multilineMode) {
-          enterMultilineMode(lines);
-      } else {
-          if (lines.length) {
-              pasteBuffer = pasteBuffer ? pasteBuffer + '\n' + lines.join('\n') : lines.join('\n');
-          }
-      }
-      
-      if (lastLine) {
-          rl.write(lastLine);
-      }
-      suppressedOutputActive = false;
-    };
-
-    const onKeypress = (str, key) => {
-        if (!multilineMode || !key) return;
-        
-        const isBackNav = key.name === 'backspace' || key.name === 'up' || key.name === 'left';
-        
-        // Allow navigating back to previous lines if at start of current line
-        if (isBackNav && rl.cursor === 0) {
-            if (pasteBuffer.length > 0) {
-                const lines = pasteBuffer.split('\n');
-                const lastLine = lines.pop();
-                pasteBuffer = lines.join('\n');
-                
-                // Insert previous line at cursor 0, merging it with current line
-                rl.write(lastLine);
-            }
-        }
-    };
-    
-    const onPasteData = (chunk) => {
-      const text = chunk.toString('utf8');
-      if (text.includes('\x1b[200~')) {
-        pasteInProgress = true;
-        suppressOutput = true;
-      }
-      if (text.includes('\x1b[201~')) {
-        pasteInProgress = false;
-        suppressOutput = false;
-      }
-    };
-
-    readline.emitKeypressEvents(process.stdin);
-    process.stdin.on('keypress', onKeypress);
-    process.stdin.on('data', onPasteData);
-    rl.on('close', () => {
-      process.stdin.removeListener('keypress', onKeypress);
-      process.stdin.removeListener('data', onPasteData);
-      if (originalWriteToOutput) rl._writeToOutput = originalWriteToOutput;
-      setBracketedPaste(false);
-    });
-
-    rl.on('line', async (line) => {
-      if (isProcessing) return;
-      const pasteResult = stripBracketedPasteSequences(line);
-      if (pasteResult.sawStart) {
-        pasteInProgress = true;
-        suppressOutput = true;
-      }
-      if (pasteResult.sawEnd) {
-        pasteInProgress = false;
-        suppressOutput = false;
-      }
-      line = pasteResult.text;
-      const isBracketedPaste = pasteInProgress || pasteResult.sawStart || pasteResult.sawEnd;
-
-      if (multilineMode && isBracketedPaste) {
-        if (!pendingLines.length) pendingStartedAt = Date.now();
-        pendingLines.push(line);
-        if (pendingTimer) clearTimeout(pendingTimer);
-        pendingTimer = setTimeout(flushPendingLines, PASTE_DEBOUNCE_MS);
-        return;
-      }
-
-      if (multilineMode) {
-        if (line.trim() === '') {
-          const payload = pasteBuffer;
-          exitMultilineMode();
-          await handleInput(payload);
-          return;
-        }
-        pasteBuffer = pasteBuffer ? `${pasteBuffer}\n${line}` : line;
-        rl.prompt();
-        return;
-      }
-
-      if (!pendingLines.length) pendingStartedAt = Date.now();
-      pendingLines.push(line);
-      if (pendingTimer) clearTimeout(pendingTimer);
-      pendingTimer = setTimeout(flushPendingLines, PASTE_DEBOUNCE_MS);
-    });
+  const setBracketedPaste = (enabled) => {
+    stdout.write(enabled ? '\x1b[?2004h' : '\x1b[?2004l');
   };
 
-  runLoop();
+  const loadHistory = () => {
+    if (!fs.existsSync(HISTORY_FILE)) return [];
+    try {
+      return fs.readFileSync(HISTORY_FILE, 'utf8')
+        .split('\n')
+        .map(l => l.trimEnd())
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  };
+
+  const appendHistory = (text) => {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return;
+    try { fs.appendFileSync(HISTORY_FILE, trimmed + '\n'); } catch {}
+  };
+
+  // --- renderer helpers (we track how many terminal rows our input occupies) ---
+  const computeCursorRows = (plain) => {
+    const cols = stdout.columns || OUTPUT_WIDTH;
+    let row = 0, col = 0;
+    for (let i = 0; i < plain.length; i++) {
+      const ch = plain[i];
+      if (ch === '\n') { row += 1; col = 0; continue; }
+      col += 1;
+      if (col >= cols) { row += 1; col = 0; }
+    }
+    return row + 1;
+  };
+
+  let renderedRows = 0;
+  const clearRender = () => {
+    const up = Math.max(0, renderedRows - 1);
+    if (up) stdout.write(`\x1b[${up}A`);
+    stdout.write('\r\x1b[J'); // clear from cursor to end of screen
+    renderedRows = 0;
+  };
+
+  // --- composer state ---
+  let buffer = '';
+  let pasteMode = false;
+  let paused = false;
+
+  let history = loadHistory();
+  let historyIndex = history.length; // one past the end
+
+  // We need to handle escape sequences split across chunks.
+  let carry = '';
+
+  const render = () => {
+    clearRender();
+
+    const parts = buffer.split('\n');
+    let out;
+    if (parts.length <= 1) {
+      out = promptAnsi + (parts[0] || '');
+    } else {
+      out = promptAnsi + (parts[0] || '') + '\n' + parts.slice(1).map(l => contIndent + (l || '')).join('\n');
+    }
+
+    stdout.write(out);
+    stdout.write('\x1b[0K'); // clear to end-of-line
+    renderedRows = computeCursorRows(stripAnsi(out));
+  };
+
+  const freezeSubmitted = () => {
+    // Leave the typed content in the scrollback, then start fresh below.
+    stdout.write('\n');
+    renderedRows = 0;
+  };
+
+  const deleteChar = () => {
+    if (!buffer) return;
+    buffer = buffer.slice(0, -1);
+    render();
+  };
+
+  const deleteWord = () => {
+    if (!buffer) return;
+    buffer = buffer.replace(/\s+$/u, '');
+    buffer = buffer.replace(/[^\s]+$/u, '');
+    render();
+  };
+
+  const histUp = () => {
+    if (!history.length) return;
+    if (historyIndex > 0) historyIndex -= 1;
+    buffer = history[historyIndex] || '';
+    render();
+  };
+
+  const histDown = () => {
+    if (!history.length) return;
+    if (historyIndex < history.length) historyIndex += 1;
+    buffer = historyIndex === history.length ? '' : (history[historyIndex] || '');
+    render();
+  };
+
+  let isProcessing = false;
+
+  const handleInput = async (rawInput) => {
+    if (isProcessing) return;
+
+    const raw = (rawInput ?? '').toString();
+    const input = raw.trim();
+
+    appendHistory(raw);
+
+    if (input.toLowerCase() === 'exit' || input.toLowerCase() === 'quit') {
+      console.log(chalk.blue('Exiting CLI. Browser session remains open for reuse.'));
+      browser.disconnect();
+      process.exit(0);
+    }
+
+    if (input.toLowerCase() === '/chats') {
+      paused = true;
+
+      const chats = await fetchRecentChats(page);
+      chats.unshift({ title: chalk.bold.green('+ New Chat'), isNewChat: true });
+
+      if (!chats.length) {
+        console.log(chalk.yellow('No recent chats found in the sidebar.'));
+      } else {
+        const selected = await selectChatFromList(chats);
+        if (selected) {
+          if (selected.isNewChat) {
+            console.log(chalk.cyan('\nStarting new chat...'));
+            await page.goto(GEMINI_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+          } else {
+            console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
+            if (selected.clickIndex >= 0) {
+              console.log(chalk.dim('Clicking chat item in sidebar...'));
+              try {
+                await page.evaluate((index) => {
+                  const items = document.querySelectorAll('[data-test-id="conversation"]');
+                  if (items[index]) items[index].click();
+                }, selected.clickIndex);
+                try { await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 }); } catch {}
+              } catch (e) {
+                console.error(chalk.red('Failed to click chat item:'), e.message);
+              }
+            } else {
+              const targetUrl = selected.href ? new URL(selected.href, GEMINI_URL).toString() : GEMINI_URL;
+              console.log(chalk.dim(`Navigating to: ${targetUrl}`));
+              await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+            }
+          }
+
+          await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
+
+          if (!selected.isNewChat) {
+            try { await page.waitForSelector('user-message, response-container, .message-content', { timeout: 5000 }); } catch {}
+          }
+
+          await applyVisibilityOverride(page);
+          await applyLifecycleOverrides(page);
+
+          if (!selected.isNewChat) {
+            let conv = await fetchConversationMessages(page);
+            if (!conv.length) {
+              console.log(chalk.dim('Waiting for messages to render...'));
+              await new Promise(r => setTimeout(r, 3000));
+              conv = await fetchConversationMessages(page);
+            }
+
+            if (!conv.length) {
+              console.log(chalk.yellow('No messages found in this chat.'));
+            } else {
+              console.log(chalk.magenta('\nChat history:\n'));
+              for (const msg of conv) {
+                if (msg.role === 'user') {
+                  console.log(chalk.bold.green('You > ') + msg.text);
+                } else {
+                  console.log(chalk.bold.cyan('Gemini > '));
+                  const rendered = renderMarkdown(normalizeMarkdown(msg.text || ''));
+                  console.log(rendered.trimEnd());
+                }
+                console.log('');
+              }
+            }
+          }
+        }
+      }
+
+      history = loadHistory();
+      historyIndex = history.length;
+      paused = false;
+      render();
+      return;
+    }
+
+    if (!input) return;
+
+    let finalPrompt = raw;
+    let isOneSentenceMode = false;
+
+    if (finalPrompt.startsWith('~')) {
+      isOneSentenceMode = true;
+      finalPrompt = 'answer in one sentence: ' + finalPrompt.substring(1);
+    }
+
+    // @include expansion
+    const includeRegex = /@include\s+("([^"]+)"|'([^']+)'|([^\s]+))/g;
+    let match;
+    let expansionError = false;
+    const replacements = [];
+
+    while ((match = includeRegex.exec(raw)) !== null) {
+      const fullMatch = match[0];
+      const filePath = match[2] || match[3] || match[4];
+
+      try {
+        const absolutePath = path.resolve(process.cwd(), filePath);
+        if (fs.existsSync(absolutePath)) {
+          const content = fs.readFileSync(absolutePath, 'utf8');
+          replacements.push({
+            original: fullMatch,
+            content: `\n\n--- Start of ${path.basename(filePath)} ---\n${content}\n--- End of ${path.basename(filePath)} ---\n`
+          });
+        } else {
+          console.log(chalk.red(`Error: File not found: ${filePath}`));
+          expansionError = true;
+        }
+      } catch (err) {
+        console.log(chalk.red(`Error reading file ${filePath}: ${err.message}`));
+        expansionError = true;
+      }
+    }
+
+    // #transcript expansion
+    const transcriptRegex = /#transcript\s+(?:(.+?)\s+)?(https?:\/\/[^\s]+)/g;
+    while ((match = transcriptRegex.exec(raw)) !== null) {
+      const fullMatch = match[0];
+      const flags = match[1] || '';
+      const url = match[2];
+
+      const ytRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.?be)\/.+$/;
+      if (!ytRegex.test(url)) {
+        console.log(chalk.red(`Error: Invalid YouTube URL: ${url}`));
+        expansionError = true;
+        continue;
+      }
+
+      try {
+        console.log(chalk.cyan(`Fetching transcript for: ${url} ${flags ? `(${flags})` : ''}...`));
+        const transcriptPath = path.resolve(__dirname, 'transcript');
+        const cmd = flags ? `"${transcriptPath}" ${flags} "${url}"` : `"${transcriptPath}" "${url}"`;
+        const output = execSync(cmd, { encoding: 'utf8' }).trim();
+
+        let expansion = `\n\n--- Transcript for YouTube video ---\n`;
+        if (flags.includes('--all')) {
+          try {
+            const data = JSON.parse(output);
+            if (data.title) expansion += `Title: ${data.title}\n`;
+            if (data.description) expansion += `Description: ${data.description}\n`;
+            expansion += `Transcript: ${data.transcript}\n`;
+          } catch {
+            expansion += `Transcript: ${output}\n`;
+          }
+        } else {
+          expansion += `Transcript: ${output}\n`;
+        }
+        expansion += `--- End of Transcript ---\n`;
+
+        replacements.push({ original: fullMatch, content: expansion });
+      } catch (err) {
+        console.log(chalk.red(`Error fetching transcript for ${url}: ${err.message}`));
+        expansionError = true;
+      }
+    }
+
+    if (expansionError) return;
+
+    for (const rep of replacements) {
+      finalPrompt = finalPrompt.replace(rep.original, rep.content);
+    }
+
+    isProcessing = true;
+    paused = true;
+    await sendPromptToGemini(page, finalPrompt, isOneSentenceMode);
+    paused = false;
+    isProcessing = false;
+
+    history = loadHistory();
+    historyIndex = history.length;
+  };
+
+  // --- input parsing ---
+  const startSeq = '\x1b[200~';
+  const endSeq = '\x1b[201~';
+
+  const isPrefixOf = (seq, tail) => seq.startsWith(tail);
+
+  const onData = async (data) => {
+    if (paused) return;
+
+    let s = carry + data.toString('utf8');
+    carry = '';
+
+    // If the buffer ends with a partial bracketed-paste boundary, carry it.
+    // (This prevents stray "\x1b[20" fragments from entering the input.)
+    for (const seq of [startSeq, endSeq, '\x1b[A', '\x1b[B', '\x1b\x7f']) {
+      const max = Math.min(seq.length - 1, s.length);
+      for (let k = max; k > 0; k--) {
+        const tail = s.slice(-k);
+        if (isPrefixOf(seq, tail)) {
+          carry = tail;
+          s = s.slice(0, -k);
+          break;
+        }
+      }
+      if (carry) break;
+    }
+
+    let i = 0;
+    while (i < s.length) {
+      // bracketed paste boundaries
+      if (s.startsWith(startSeq, i)) { pasteMode = true; i += startSeq.length; continue; }
+      if (s.startsWith(endSeq, i)) { pasteMode = false; i += endSeq.length; continue; }
+
+      if (pasteMode) {
+        // In paste mode: treat everything literally (including newlines).
+        // Normalize CRLF/CR to LF.
+        const nextBoundary = (() => {
+          const a = s.indexOf(endSeq, i);
+          const b = s.indexOf(startSeq, i);
+          if (a === -1 && b === -1) return -1;
+          if (a === -1) return b;
+          if (b === -1) return a;
+          return Math.min(a, b);
+        })();
+
+        const chunk = nextBoundary === -1 ? s.slice(i) : s.slice(i, nextBoundary);
+        i = nextBoundary === -1 ? s.length : nextBoundary;
+
+        buffer += chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        render();
+        continue;
+      }
+
+      const ch = s[i];
+      const code = ch.charCodeAt(0);
+
+      // Enter
+      if (ch === '\r' || ch === '\n') {
+        if (buffer.trim()) {
+          const submitText = buffer;
+          buffer = '';
+          historyIndex = history.length;
+          freezeSubmitted();
+          await handleInput(submitText);
+          render();
+        } else {
+          buffer = '';
+          render();
+        }
+        i += 1;
+        continue;
+      }
+
+      // Ctrl+C
+      if (code === 3) {
+        if (buffer.length) {
+          buffer = '';
+          render();
+        } else {
+          process.emit('SIGINT');
+        }
+        i += 1;
+        continue;
+      }
+
+      // Ctrl+U
+      if (code === 21) {
+        buffer = '';
+        render();
+        i += 1;
+        continue;
+      }
+
+      // Backspace
+      if (code === 127) {
+        deleteChar();
+        i += 1;
+        continue;
+      }
+
+      // Alt+Backspace (ESC DEL)
+      if (s.startsWith('\x1b\x7f', i)) {
+        deleteWord();
+        i += 2;
+        continue;
+      }
+
+      // Up / Down arrows for history
+      if (s.startsWith('\x1b[A', i)) { histUp(); i += 3; continue; }
+      if (s.startsWith('\x1b[B', i)) { histDown(); i += 3; continue; }
+
+      // Any other ESC: ignore it
+      if (ch === '\x1b') { i += 1; continue; }
+
+      // Plain text chunk
+      let j = i + 1;
+      while (j < s.length) {
+        const cj = s[j];
+        const ccode = cj.charCodeAt(0);
+        if (cj === '\x1b' || cj === '\r' || cj === '\n' || ccode === 3 || ccode === 21 || ccode === 127) break;
+        if (s.startsWith(startSeq, j) || s.startsWith(endSeq, j)) break;
+        j += 1;
+      }
+      buffer += s.slice(i, j);
+      render();
+      i = j;
+    }
+  };
+
+  // --- activate ---
+  stdin.resume();
+  stdin.setRawMode(true);
+  setBracketedPaste(true);
+
+  // Ensure we restore terminal state on exit
+  const cleanup = () => {
+    try { setBracketedPaste(false); } catch {}
+    try { stdin.setRawMode(false); } catch {}
+  };
+  process.on('exit', cleanup);
+  process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+
+  stdin.on('data', onData);
+  render();
 }
+
 
 async function fetchDomMarkdownAI(page) {
   try {

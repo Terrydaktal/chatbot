@@ -1719,7 +1719,7 @@ async function startChatInterface(page, browser) {
     let pendingLines = [];
     let pendingTimer = null;
     let pasteBuffer = '';
-    let awaitingPasteConfirm = false;
+    let multilineMode = false;
     const defaultPrompt = chalk.bold.green('\nYou > ');
     const pastePrompt = chalk.bold.yellow('... ');
     const rl = readline.createInterface({
@@ -1962,36 +1962,17 @@ async function startChatInterface(page, browser) {
       rl.prompt();
     };
 
-    const enterPasteMode = (lines) => {
+    const enterMultilineMode = (lines) => {
       pasteBuffer = lines.join('\n');
-      awaitingPasteConfirm = true;
+      multilineMode = true;
       rl.setPrompt(pastePrompt);
-      console.log(chalk.yellow('Pasted multi-line input. Type /send to submit, /edit to edit, or /cancel to discard.'));
       rl.prompt();
     };
 
-    const exitPasteMode = () => {
+    const exitMultilineMode = () => {
       pasteBuffer = '';
-      awaitingPasteConfirm = false;
+      multilineMode = false;
       rl.setPrompt(defaultPrompt);
-    };
-
-    const openEditorForPaste = async () => {
-      const editor = process.env.EDITOR || process.env.VISUAL;
-      if (!editor) {
-        console.log(chalk.yellow('No $EDITOR set. Use /send, /cancel, or keep typing to append.'));
-        return;
-      }
-      try {
-        const tmpPath = path.join(__dirname, `.paste-${Date.now()}.txt`);
-        fs.writeFileSync(tmpPath, pasteBuffer, 'utf8');
-        execSync(`${editor} "${tmpPath}"`, { stdio: 'inherit' });
-        pasteBuffer = fs.readFileSync(tmpPath, 'utf8').replace(/\s+$/, '');
-        fs.unlinkSync(tmpPath);
-        console.log(chalk.dim('Paste buffer updated from editor.'));
-      } catch (err) {
-        console.log(chalk.red(`Failed to open editor: ${err.message}`));
-      }
     };
 
     const flushPendingLines = () => {
@@ -2003,32 +1984,17 @@ async function startChatInterface(page, browser) {
         void handleInput(lines[0]);
         return;
       }
-      enterPasteMode(lines);
+      enterMultilineMode(lines);
     };
 
     rl.on('line', async (line) => {
       if (isProcessing) return;
 
-      if (awaitingPasteConfirm) {
-        const trimmed = line.trim();
-        const lower = trimmed.toLowerCase();
-        if (lower === '/cancel') {
-          exitPasteMode();
-          return;
-        }
-        if (lower === '/send') {
+      if (multilineMode) {
+        if (line.trim() === '') {
           const payload = pasteBuffer;
-          exitPasteMode();
+          exitMultilineMode();
           await handleInput(payload);
-          return;
-        }
-        if (lower === '/edit') {
-          await openEditorForPaste();
-          return;
-        }
-        if (lower === '/show') {
-          console.log(chalk.dim('\n--- Paste buffer ---\n') + pasteBuffer + '\n' + chalk.dim('--- End ---'));
-          rl.prompt();
           return;
         }
         pasteBuffer = pasteBuffer ? `${pasteBuffer}\n${line}` : line;

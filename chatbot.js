@@ -2034,21 +2034,22 @@ async function startChatInterface(page, browser) {
       return process.stdin.readableLength > 0;
     };
 
-    const clearWrappedLines = (text) => {
-      if (!process.stdout.isTTY) return;
+    const clearWrappedLinesBlock = (lines) => {
+      if (!process.stdout.isTTY || !lines.length) return;
       const cols = process.stdout.columns || OUTPUT_WIDTH;
-      const rows = Math.max(1, Math.ceil(stripAnsi(text || '').length / cols));
-      if (rows > 1) {
-        process.stdout.write(`\x1b[${rows}A`);
+      const rows = lines.map(line => Math.max(1, Math.ceil(stripAnsi(line || '').length / cols)));
+      const totalRows = rows.reduce((sum, count) => sum + count, 0);
+      if (totalRows > 1) {
+        process.stdout.write(`\x1b[${totalRows}A`);
       } else {
         process.stdout.write('\x1b[1A');
       }
-      for (let i = 0; i < rows; i++) {
+      for (let i = 0; i < totalRows; i++) {
         process.stdout.write('\r\x1b[2K');
-        if (i < rows - 1) process.stdout.write('\x1b[1B');
+        if (i < totalRows - 1) process.stdout.write('\x1b[1B');
       }
-      if (rows > 1) {
-        process.stdout.write(`\x1b[${rows - 1}A`);
+      if (totalRows > 1) {
+        process.stdout.write(`\x1b[${totalRows - 1}A`);
       }
     };
 
@@ -2067,6 +2068,7 @@ async function startChatInterface(page, browser) {
         }
       }
       const lines = pendingLines;
+      const allLines = lines.slice();
       pendingLines = [];
       pendingTimer = null;
       pendingStartedAt = 0;
@@ -2079,10 +2081,10 @@ async function startChatInterface(page, browser) {
       // Keep last line editable
       const lastLine = lines.pop() || '';
       
-      // Remove the echoed last line from terminal to prevent duplication.
-      // The 'line' event implies the terminal has already echoed the line and a newline.
-      if (lastLine && process.stdout.isTTY && !suppressedOutputActive) {
-          clearWrappedLines(lastLine);
+      // Remove the echoed paste block from terminal to prevent uneditable copies.
+      // The 'line' event implies the terminal has already echoed the lines and newlines.
+      if (process.stdout.isTTY && !suppressedOutputActive && allLines.length) {
+          clearWrappedLinesBlock(allLines);
       }
       if (suppressedOutputActive && process.stdout.isTTY) {
           process.stdout.clearLine(0);

@@ -1811,7 +1811,7 @@ async function startChatInterface(page, browser) {
   };
 
   // --- renderer helpers (we track how many terminal rows our input occupies) ---
-  const computeCursorRows = (plain) => {
+  const computePosition = (plain) => {
     const cols = stdout.columns || OUTPUT_WIDTH;
     let row = 0, col = 0;
     for (let i = 0; i < plain.length; i++) {
@@ -1820,8 +1820,10 @@ async function startChatInterface(page, browser) {
       col += 1;
       if (col >= cols) { row += 1; col = 0; }
     }
-    return row + 1;
+    return { row, col };
   };
+
+  const computeCursorRows = (plain) => computePosition(plain).row + 1;
 
   let renderedRows = 0;
   const clearRender = () => {
@@ -1833,6 +1835,7 @@ async function startChatInterface(page, browser) {
 
   // --- composer state ---
   let buffer = '';
+  let cursorPos = 0;
   let pasteMode = false;
   let paused = false;
 
@@ -1855,7 +1858,38 @@ async function startChatInterface(page, browser) {
 
     stdout.write(out);
     stdout.write('\x1b[0K'); // clear to end-of-line
-    renderedRows = computeCursorRows(stripAnsi(out));
+    
+    const plainOut = stripAnsi(out);
+    const totalPos = computePosition(plainOut);
+    renderedRows = totalPos.row + 1;
+
+    // Calculate cursor visual position
+    const prefixBuffer = buffer.slice(0, cursorPos);
+    const prefixParts = prefixBuffer.split('\n');
+    let outPrefix;
+    if (prefixParts.length <= 1) {
+        outPrefix = promptAnsi + (prefixParts[0] || '');
+    } else {
+        outPrefix = promptAnsi + (prefixParts[0] || '') + '\n' + prefixParts.slice(1).map(l => contIndent + (l || '')).join('\n');
+    }
+    
+    const plainPrefix = stripAnsi(outPrefix);
+    const cursorLoc = computePosition(plainPrefix);
+
+    // Move cursor relative to the end of the output
+    // The write(out) ended at totalPos.row, totalPos.col
+    // But we can just use absolute movement logic since we know the geometry of the block we just printed
+    
+    // Simplest reliable way: Go to bottom line of render, then move up
+    // However, stdout cursor is already at bottom line (totalPos.row)
+    
+    // 1. Move up if needed
+    const up = totalPos.row - cursorLoc.row;
+    if (up > 0) stdout.write(`\x1b[${up}A`);
+    
+    // 2. Move to correct column
+    stdout.write('\r');
+    if (cursorLoc.col > 0) stdout.write(`\x1b[${cursorLoc.col}C`);
   };
 
   const freezeSubmitted = () => {
@@ -1865,15 +1899,24 @@ async function startChatInterface(page, browser) {
   };
 
   const deleteChar = () => {
-    if (!buffer) return;
-    buffer = buffer.slice(0, -1);
+    if (!buffer || cursorPos === 0) return;
+    buffer = buffer.slice(0, cursorPos - 1) + buffer.slice(cursorPos);
+    cursorPos--;
     render();
   };
 
   const deleteWord = () => {
-    if (!buffer) return;
-    buffer = buffer.replace(/\s+$/u, '');
-    buffer = buffer.replace(/[^\s]+$/u, '');
+    if (!buffer || cursorPos === 0) return;
+    const left = buffer.slice(0, cursorPos);
+    const right = buffer.slice(cursorPos);
+    
+    // Remove trailing spaces first if any
+    let newLeft = left.replace(/\s+$/u, '');
+    // Then remove non-spaces
+    newLeft = newLeft.replace(/[^\s]+$/u, '');
+    
+    cursorPos = newLeft.length;
+    buffer = newLeft + right;
     render();
   };
 
@@ -1881,6 +1924,7 @@ async function startChatInterface(page, browser) {
     if (!history.length) return;
     if (historyIndex > 0) historyIndex -= 1;
     buffer = history[historyIndex] || '';
+    cursorPos = buffer.length;
     render();
   };
 
@@ -1888,6 +1932,7 @@ async function startChatInterface(page, browser) {
     if (!history.length) return;
     if (historyIndex < history.length) historyIndex += 1;
     buffer = historyIndex === history.length ? '' : (history[historyIndex] || '');
+    cursorPos = buffer.length;
     render();
   };
 
@@ -2132,7 +2177,9 @@ async function startChatInterface(page, browser) {
         const chunk = nextBoundary === -1 ? s.slice(i) : s.slice(i, nextBoundary);
         i = nextBoundary === -1 ? s.length : nextBoundary;
 
-        buffer += chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const text = chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        buffer = buffer.slice(0, cursorPos) + text + buffer.slice(cursorPos);
+        cursorPos += text.length;
         render();
         continue;
       }
@@ -2145,12 +2192,14 @@ async function startChatInterface(page, browser) {
         if (buffer.trim()) {
           const submitText = buffer;
           buffer = '';
+          cursorPos = 0;
           historyIndex = history.length;
           freezeSubmitted();
           await handleInput(submitText);
           render();
         } else {
           buffer = '';
+          cursorPos = 0;
           render();
         }
         i += 1;
@@ -2161,6 +2210,7 @@ async function startChatInterface(page, browser) {
       if (code === 3) {
         if (buffer.length) {
           buffer = '';
+          cursorPos = 0;
           render();
         } else {
           process.emit('SIGINT');
@@ -2172,6 +2222,7 @@ async function startChatInterface(page, browser) {
       // Ctrl+U
       if (code === 21) {
         buffer = '';
+        cursorPos = 0;
         render();
         i += 1;
         continue;
@@ -2195,8 +2246,21 @@ async function startChatInterface(page, browser) {
       if (s.startsWith('\x1b[A', i)) { histUp(); i += 3; continue; }
       if (s.startsWith('\x1b[B', i)) { histDown(); i += 3; continue; }
 
-      // Ignore Left / Right arrows (prevent them from printing as text)
-      if (s.startsWith('\x1b[C', i) || s.startsWith('\x1b[D', i)) { i += 3; continue; }
+      // Left Arrow
+      if (s.startsWith('\x1b[D', i)) {
+        if (cursorPos > 0) cursorPos--;
+        render();
+        i += 3;
+        continue;
+      }
+
+      // Right Arrow
+      if (s.startsWith('\x1b[C', i)) {
+        if (cursorPos < buffer.length) cursorPos++;
+        render();
+        i += 3;
+        continue;
+      }
 
       // Any other ESC: ignore it
       if (ch === '\x1b') { i += 1; continue; }
@@ -2210,7 +2274,9 @@ async function startChatInterface(page, browser) {
         if (s.startsWith(startSeq, j) || s.startsWith(endSeq, j)) break;
         j += 1;
       }
-      buffer += s.slice(i, j);
+      const chunk = s.slice(i, j);
+      buffer = buffer.slice(0, cursorPos) + chunk + buffer.slice(cursorPos);
+      cursorPos += chunk.length;
       render();
       i = j;
     }

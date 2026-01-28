@@ -1111,7 +1111,9 @@ async function fetchConversationMessages(page) {
         '.user-message-content',
         '.query-text',
         '.user-query',
-        '[data-xid="aim-mars-input-plate"] textarea'
+        '[data-xid="aim-mars-input-plate"] textarea',
+        '.VndcI',
+        '.sUKAcb'
       ];
       // Use Set to avoid duplicate nodes from overlapping selectors
       const userNodes = Array.from(new Set(Array.from(root.querySelectorAll(userSelectors.join(',')))));
@@ -1122,7 +1124,9 @@ async function fetchConversationMessages(page) {
           '.model-response-text', 
           '.message-content', 
           '.markdown',
-          '[data-xid="aim-mars-turn-root"]'
+          '[data-xid="aim-mars-turn-root"]',
+          '[data-xid="VpUvz"]',
+          '.Y3BBE'
       ];
       // Filter out nodes that are descendants of other nodes in the list to avoid double counting
       const rawAiNodes = Array.from(root.querySelectorAll(aiSelectors.join(',')));

@@ -1116,7 +1116,11 @@ async function fetchConversationMessages(page) {
         '.sUKAcb'
       ];
       // Use Set to avoid duplicate nodes from overlapping selectors
-      const userNodes = Array.from(new Set(Array.from(root.querySelectorAll(userSelectors.join(',')))));
+      const rawUserNodes = Array.from(root.querySelectorAll(userSelectors.join(',')));
+      const userNodes = rawUserNodes.filter(node => {
+          // Keep only top-level user nodes among the candidates
+          return !rawUserNodes.some(other => other !== node && other.contains(node));
+      });
       
       const aiSelectors = [
           'response-container', 
@@ -1128,11 +1132,19 @@ async function fetchConversationMessages(page) {
           '[data-xid="VpUvz"]',
           '.Y3BBE'
       ];
-      // Filter out nodes that are descendants of other nodes in the list to avoid double counting
+      // Filter out nodes that are descendants of other nodes in the list to avoid double counting.
+      // Also ensure AI nodes do not contain any user nodes (relevant for some nested structures).
       const rawAiNodes = Array.from(root.querySelectorAll(aiSelectors.join(',')));
       const aiNodes = rawAiNodes.filter(node => {
-          // If this node has an ancestor that is also in the list, ignore it (we want the top-level container)
-          return !rawAiNodes.some(other => other !== node && other.contains(node));
+          // 1. Must not have an ancestor that is also an AI node
+          const hasAiAncestor = rawAiNodes.some(other => other !== node && other.contains(node));
+          if (hasAiAncestor) return false;
+          
+          // 2. Must not be a user node or contain a user node
+          const isOrContainsUser = userNodes.some(userNode => node === userNode || node.contains(userNode));
+          if (isOrContainsUser) return false;
+
+          return true;
       });
 
       const items = [];

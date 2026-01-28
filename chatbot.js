@@ -1106,11 +1106,8 @@ async function fetchConversationMessages(page) {
         '[data-test-id="user-message"]',
         '.user-message',
         '.user-message-content',
-        '.query-text',
-        '.user-query',
         '[data-xid="aim-mars-input-plate"] textarea',
-        'span.VndcI',
-        '.sUKAcb'
+        'span.VndcI'
       ];
       // Use Set to avoid duplicate nodes from overlapping selectors
       const rawUserNodes = Array.from(root.querySelectorAll(userSelectors.join(',')));

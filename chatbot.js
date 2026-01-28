@@ -831,13 +831,14 @@ async function fetchRecentChats(page, options = {}) {
             const seen = new Set();
             const elements = Array.from(document.querySelectorAll(itemSelector));
             
-            for (const el of elements) {
-                const title = el.innerText.trim() || el.getAttribute('aria-label') || 'Untitled Chat';
-                const href = el.href;
-                if (!href || seen.has(href)) continue;
-                seen.add(href);
-                results.push({ title, href, clickIndex: -1 });
-            }
+            elements.forEach((el, index) => {
+                const title = (el.innerText || el.getAttribute('aria-label') || 'Untitled Chat').trim();
+                const threadId = el.getAttribute('data-thread-id');
+                const key = threadId || `idx:${index}`;
+                if (seen.has(key)) return;
+                seen.add(key);
+                results.push({ title, href: '', clickIndex: index });
+            });
             return results.slice(0, 30);
         }, AI_MODE_HISTORY_ITEM_SELECTOR);
     }
@@ -1279,7 +1280,7 @@ const AI_RESPONSE_SELECTOR = '[data-xid="aim-mars-turn-root"] [data-xid="VpUvz"]
 const AI_RESPONSE_CONTAINER_SELECTOR = '[data-xid="aim-mars-turn-root"]';
 const AI_SEND_SELECTORS = ['button[aria-label="Send"]', 'button[data-xid="input-plate-send-button"]', '.OEueve'];
 const AI_MODE_HISTORY_BUTTON_SELECTOR = 'button.UTNPFf[aria-label="AI Mode history"]';
-const AI_MODE_HISTORY_ITEM_SELECTOR = 'a[href*="search?udm=50"][data-ved], a[href*="search?q="][data-ved]';
+const AI_MODE_HISTORY_ITEM_SELECTOR = 'button.qqMZif[data-thread-id]';
 
 const streamHandlers = {
   onNewChunk: null,
@@ -1915,10 +1916,11 @@ async function startChatInterface(page, browser) {
             if (selected.clickIndex >= 0) {
               console.log(chalk.dim('Clicking chat item in sidebar...'));
               try {
-                await page.evaluate((index) => {
-                  const items = document.querySelectorAll('[data-test-id="conversation"]');
+                const selector = options.aiMode ? AI_MODE_HISTORY_ITEM_SELECTOR : '[data-test-id="conversation"]';
+                await page.evaluate((index, sel) => {
+                  const items = document.querySelectorAll(sel);
                   if (items[index]) items[index].click();
-                }, selected.clickIndex);
+                }, selected.clickIndex, selector);
                 try { await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 }); } catch {}
               } catch (e) {
                 console.error(chalk.red('Failed to click chat item:'), e.message);

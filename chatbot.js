@@ -2242,6 +2242,13 @@ async function startChatInterface(page, browser) {
         continue;
       }
 
+      // Ctrl+W / Ctrl+Backspace (Delete Word)
+      if (code === 23) {
+        deleteWord();
+        i += 1;
+        continue;
+      }
+
       // Up / Down arrows for history
       if (s.startsWith('\x1b[A', i)) { histUp(); i += 3; continue; }
       if (s.startsWith('\x1b[B', i)) { histDown(); i += 3; continue; }
@@ -2270,7 +2277,7 @@ async function startChatInterface(page, browser) {
       while (j < s.length) {
         const cj = s[j];
         const ccode = cj.charCodeAt(0);
-        if (cj === '\x1b' || cj === '\r' || cj === '\n' || ccode === 3 || ccode === 21 || ccode === 127) break;
+        if (cj === '\x1b' || cj === '\r' || cj === '\n' || ccode === 3 || ccode === 21 || ccode === 23 || ccode === 127) break;
         if (s.startsWith(startSeq, j) || s.startsWith(endSeq, j)) break;
         j += 1;
       }

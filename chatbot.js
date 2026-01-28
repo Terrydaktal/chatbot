@@ -810,8 +810,38 @@ async function waitForResponseAndRender(page, initialCount, isOneSentenceMode = 
   }
 }
 
-async function fetchRecentChats(page) {
+async function fetchRecentChats(page, options = {}) {
   try {
+    if (options.aiMode) {
+        // AI Mode History Logic
+        const historyButton = await page.$(AI_MODE_HISTORY_BUTTON_SELECTOR);
+        if (historyButton) {
+            // Check if sidebar is already open by looking for items
+            let items = await page.$$(AI_MODE_HISTORY_ITEM_SELECTOR);
+            if (items.length === 0) {
+                await historyButton.click();
+                // Wait for any item to appear
+                await new Promise(r => setTimeout(r, 1000));
+                try { await page.waitForSelector(AI_MODE_HISTORY_ITEM_SELECTOR, { timeout: 5000 }); } catch(e) {}
+            }
+        }
+
+        return await page.evaluate((itemSelector) => {
+            const results = [];
+            const seen = new Set();
+            const elements = Array.from(document.querySelectorAll(itemSelector));
+            
+            for (const el of elements) {
+                const title = el.innerText.trim() || el.getAttribute('aria-label') || 'Untitled Chat';
+                const href = el.href;
+                if (!href || seen.has(href)) continue;
+                seen.add(href);
+                results.push({ title, href, clickIndex: -1 });
+            }
+            return results.slice(0, 30);
+        }, AI_MODE_HISTORY_ITEM_SELECTOR);
+    }
+
     return await page.evaluate(() => {
       const tooltipMap = new Map();
       const tooltipContainer = document.querySelector('.cdk-describedby-message-container');
@@ -1079,7 +1109,8 @@ async function fetchConversationMessages(page) {
         '.user-message',
         '.user-message-content',
         '.query-text',
-        '.user-query'
+        '.user-query',
+        '[data-xid="aim-mars-input-plate"] textarea'
       ];
       // Use Set to avoid duplicate nodes from overlapping selectors
       const userNodes = Array.from(new Set(Array.from(root.querySelectorAll(userSelectors.join(',')))));
@@ -1089,7 +1120,8 @@ async function fetchConversationMessages(page) {
           'model-response', 
           '.model-response-text', 
           '.message-content', 
-          '.markdown'
+          '.markdown',
+          '[data-xid="aim-mars-turn-root"]'
       ];
       // Filter out nodes that are descendants of other nodes in the list to avoid double counting
       const rawAiNodes = Array.from(root.querySelectorAll(aiSelectors.join(',')));
@@ -1246,6 +1278,8 @@ const RESPONSE_CONTAINER_SELECTOR = 'response-container, .response-container';
 const AI_RESPONSE_SELECTOR = '[data-xid="aim-mars-turn-root"] [data-xid="VpUvz"], [data-xid="aim-mars-turn-root"]';
 const AI_RESPONSE_CONTAINER_SELECTOR = '[data-xid="aim-mars-turn-root"]';
 const AI_SEND_SELECTORS = ['button[aria-label="Send"]', 'button[data-xid="input-plate-send-button"]', '.OEueve'];
+const AI_MODE_HISTORY_BUTTON_SELECTOR = 'button.UTNPFf[aria-label="AI Mode history"]';
+const AI_MODE_HISTORY_ITEM_SELECTOR = 'a[href*="search?udm=50"][data-ved], a[href*="search?q="][data-ved]';
 
 const streamHandlers = {
   onNewChunk: null,
@@ -1864,17 +1898,18 @@ async function startChatInterface(page, browser) {
     if (input.toLowerCase() === '/chats') {
       paused = true;
 
-      const chats = await fetchRecentChats(page);
+      const chats = await fetchRecentChats(page, options);
       chats.unshift({ title: chalk.bold.green('+ New Chat'), isNewChat: true });
 
       if (!chats.length) {
-        console.log(chalk.yellow('No recent chats found in the sidebar.'));
+        console.log(chalk.yellow('No recent chats found.'));
       } else {
         const selected = await selectChatFromList(chats);
         if (selected) {
+          const TARGET_URL = options.aiMode ? AI_MODE_URL : GEMINI_URL;
           if (selected.isNewChat) {
             console.log(chalk.cyan('\nStarting new chat...'));
-            await page.goto(GEMINI_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+            await page.goto(TARGET_URL, { waitUntil: 'networkidle2', timeout: 60000 });
           } else {
             console.log(chalk.cyan(`\nLoading chat: ${selected.title || 'Untitled'}`));
             if (selected.clickIndex >= 0) {
@@ -1889,16 +1924,18 @@ async function startChatInterface(page, browser) {
                 console.error(chalk.red('Failed to click chat item:'), e.message);
               }
             } else {
-              const targetUrl = selected.href ? new URL(selected.href, GEMINI_URL).toString() : GEMINI_URL;
+              const targetUrl = selected.href ? new URL(selected.href, TARGET_URL).toString() : TARGET_URL;
               console.log(chalk.dim(`Navigating to: ${targetUrl}`));
               await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
             }
           }
 
-          await page.waitForSelector('.ql-editor, textarea, [contenteditable="true"]', { timeout: 300000 });
+          const inputSelector = options.aiMode ? '.ITIRGe, textarea[aria-label="Ask anything"]' : '.ql-editor, textarea, [contenteditable="true"]';
+          await page.waitForSelector(inputSelector, { timeout: 300000 });
 
           if (!selected.isNewChat) {
-            try { await page.waitForSelector('user-message, response-container, .message-content', { timeout: 5000 }); } catch {}
+            const responseSelector = options.aiMode ? AI_RESPONSE_SELECTOR : 'user-message, response-container, .message-content';
+            try { await page.waitForSelector(responseSelector, { timeout: 5000 }); } catch {}
           }
 
           await applyVisibilityOverride(page);
@@ -1920,7 +1957,7 @@ async function startChatInterface(page, browser) {
                 if (msg.role === 'user') {
                   console.log(chalk.bold.green('You > ') + msg.text);
                 } else {
-                  console.log(chalk.bold.cyan('Gemini > '));
+                  console.log(chalk.bold.cyan(options.aiMode ? 'Google AI > ' : 'Gemini > '));
                   const rendered = renderMarkdown(normalizeMarkdown(msg.text || ''));
                   console.log(rendered.trimEnd());
                 }

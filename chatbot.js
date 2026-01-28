@@ -1910,10 +1910,12 @@ async function startChatInterface(page, browser) {
     const left = buffer.slice(0, cursorPos);
     const right = buffer.slice(cursorPos);
     
-    // Remove trailing spaces first if any
-    let newLeft = left.replace(/\s+$/u, '');
-    // Then remove non-spaces
-    newLeft = newLeft.replace(/[^\s]+$/u, '');
+    let newLeft;
+    if (/\s$/.test(left)) {
+        newLeft = left.replace(/\s+$/, '');
+    } else {
+        newLeft = left.replace(/[^\s]+$/, '');
+    }
     
     cursorPos = newLeft.length;
     buffer = newLeft + right;
@@ -2243,7 +2245,7 @@ async function startChatInterface(page, browser) {
       }
 
       // Ctrl+W / Ctrl+Backspace (Delete Word)
-      if (code === 23) {
+      if (code === 23 || code === 8) {
         deleteWord();
         i += 1;
         continue;
@@ -2277,7 +2279,7 @@ async function startChatInterface(page, browser) {
       while (j < s.length) {
         const cj = s[j];
         const ccode = cj.charCodeAt(0);
-        if (cj === '\x1b' || cj === '\r' || cj === '\n' || ccode === 3 || ccode === 21 || ccode === 23 || ccode === 127) break;
+        if (cj === '\x1b' || cj === '\r' || cj === '\n' || ccode === 3 || ccode === 8 || ccode === 21 || ccode === 23 || ccode === 127) break;
         if (s.startsWith(startSeq, j) || s.startsWith(endSeq, j)) break;
         j += 1;
       }

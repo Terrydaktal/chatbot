@@ -1099,10 +1099,7 @@ async function fetchConversationMessages(page) {
         return md.trim();
       }
 
-      const root = document.querySelector('chat-window-content') ||
-        document.querySelector('chat-window') ||
-        document.querySelector('main') ||
-        document.body;
+      const root = document;
 
       const userSelectors = [
         'user-message',
@@ -1112,7 +1109,7 @@ async function fetchConversationMessages(page) {
         '.query-text',
         '.user-query',
         '[data-xid="aim-mars-input-plate"] textarea',
-        '.VndcI',
+        'span.VndcI',
         '.sUKAcb'
       ];
       // Use Set to avoid duplicate nodes from overlapping selectors
@@ -1130,7 +1127,8 @@ async function fetchConversationMessages(page) {
           '.markdown',
           '[data-xid="aim-mars-turn-root"]',
           '[data-xid="VpUvz"]',
-          '.Y3BBE'
+          '.Y3BBE',
+          '.mZJni'
       ];
       // Filter out nodes that are descendants of other nodes in the list to avoid double counting.
       // Also ensure AI nodes do not contain any user nodes (relevant for some nested structures).

@@ -24,6 +24,7 @@ const TABLE_COL_WIDTH = Math.max(12, Math.floor((OUTPUT_WIDTH - 10) / 3));
 const TYPING_FRAMES = ['●○○○', '○●○○', '○○●○', '○○○●'];
 const TYPING_INTERVAL_MS = 120;
 const LINE_STREAM_DELAY_MS = 35;
+const CHAR_STREAM_DELAY_MS = 5;
 const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
 const AI_RESPONSE_POLL_INTERVAL_MS = 150;
 const AI_RESPONSE_STABLE_TICKS = 2;
@@ -786,16 +787,26 @@ async function waitForResponseAndRender(page, initialCount, isOneSentenceMode = 
   const rendered = renderMarkdown(finalText, { reflowText: !isOneSentenceMode });
   const lines = rendered.split('\n');
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const suffix = i < lines.length - 1 ? '\n' : '';
-    process.stdout.write(`${line}${suffix}`);
-    if (LINE_STREAM_DELAY_MS > 0) {
-      await new Promise(resolve => setTimeout(resolve, LINE_STREAM_DELAY_MS));
+  if (isOneSentenceMode) {
+    for (let i = 0; i < rendered.length; i++) {
+      process.stdout.write(rendered[i]);
+      if (CHAR_STREAM_DELAY_MS > 0) {
+        await new Promise(resolve => setTimeout(resolve, CHAR_STREAM_DELAY_MS));
+      }
     }
-  }
-  if (!rendered.endsWith('\n')) {
     process.stdout.write('\n');
+  } else {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const suffix = i < lines.length - 1 ? '\n' : '';
+      process.stdout.write(`${line}${suffix}`);
+      if (LINE_STREAM_DELAY_MS > 0) {
+        await new Promise(resolve => setTimeout(resolve, LINE_STREAM_DELAY_MS));
+      }
+    }
+    if (!rendered.endsWith('\n')) {
+      process.stdout.write('\n');
+    }
   }
 }
 
@@ -2511,16 +2522,26 @@ async function waitForAIResponseAndRender(page, initialCount, isOneSentenceMode 
   const rendered = renderMarkdown(finalText, { reflowText: !isOneSentenceMode });
   const lines = rendered.split('\n');
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const suffix = i < lines.length - 1 ? '\n' : '';
-    process.stdout.write(`${line}${suffix}`);
-    if (LINE_STREAM_DELAY_MS > 0) {
-      await new Promise(resolve => setTimeout(resolve, LINE_STREAM_DELAY_MS));
+  if (isOneSentenceMode) {
+    for (let i = 0; i < rendered.length; i++) {
+      process.stdout.write(rendered[i]);
+      if (CHAR_STREAM_DELAY_MS > 0) {
+        await new Promise(resolve => setTimeout(resolve, CHAR_STREAM_DELAY_MS));
+      }
     }
-  }
-  if (!rendered.endsWith('\n')) {
     process.stdout.write('\n');
+  } else {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const suffix = i < lines.length - 1 ? '\n' : '';
+      process.stdout.write(`${line}${suffix}`);
+      if (LINE_STREAM_DELAY_MS > 0) {
+        await new Promise(resolve => setTimeout(resolve, LINE_STREAM_DELAY_MS));
+      }
+    }
+    if (!rendered.endsWith('\n')) {
+      process.stdout.write('\n');
+    }
   }
 }
 

@@ -2098,7 +2098,7 @@ async function startChatInterface(page, browser) {
 
     // If the buffer ends with a partial bracketed-paste boundary, carry it.
     // (This prevents stray "\x1b[20" fragments from entering the input.)
-    for (const seq of [startSeq, endSeq, '\x1b[A', '\x1b[B', '\x1b\x7f']) {
+    for (const seq of [startSeq, endSeq, '\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D', '\x1b\x7f']) {
       const max = Math.min(seq.length - 1, s.length);
       for (let k = max; k > 0; k--) {
         const tail = s.slice(-k);
@@ -2194,6 +2194,9 @@ async function startChatInterface(page, browser) {
       // Up / Down arrows for history
       if (s.startsWith('\x1b[A', i)) { histUp(); i += 3; continue; }
       if (s.startsWith('\x1b[B', i)) { histDown(); i += 3; continue; }
+
+      // Ignore Left / Right arrows (prevent them from printing as text)
+      if (s.startsWith('\x1b[C', i) || s.startsWith('\x1b[D', i)) { i += 3; continue; }
 
       // Any other ESC: ignore it
       if (ch === '\x1b') { i += 1; continue; }

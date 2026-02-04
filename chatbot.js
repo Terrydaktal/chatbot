@@ -1836,13 +1836,21 @@ async function startChatInterface(page, browser) {
 
   // --- renderer helpers (we track how many terminal rows our input occupies) ---
   const computePosition = (plain) => {
-    const cols = stdout.columns || OUTPUT_WIDTH;
+    const cols = process.stdout.columns || OUTPUT_WIDTH;
     let row = 0, col = 0;
     for (let i = 0; i < plain.length; i++) {
       const ch = plain[i];
-      if (ch === '\n') { row += 1; col = 0; continue; }
+      if (ch === '\n') { 
+          row += 1; 
+          col = 0; 
+          continue; 
+      }
+      
+      if (col >= cols) {
+          row += 1;
+          col = 0;
+      }
       col += 1;
-      if (col >= cols) { row += 1; col = 0; }
     }
     return { row, col };
   };

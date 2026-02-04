@@ -21,12 +21,23 @@ trap 'rm -rf "$TEMP_DIR"' EXIT
 PDF_FILE=""
 TXT_FILE="$TEMP_DIR/document.txt"
 
+USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 if [[ "$INPUT" =~ ^https?:// ]]; then
     PDF_FILE="$TEMP_DIR/document.pdf"
     # Download the PDF
-    if ! curl -L "$INPUT" -o "$PDF_FILE" --silent; then
+    if ! curl -L -A "$USER_AGENT" "$INPUT" -o "$PDF_FILE" --silent; then
         echo "Error: Failed to download PDF from $INPUT"
         exit 1
+    fi
+
+    # Check if it's actually a PDF. If not, try puppeteer fallback.
+    if ! file "$PDF_FILE" | grep -q "PDF document"; then
+        echo "CURL failed to get PDF. Trying Puppeteer fallback..." >&2
+        if ! node "$(dirname "$0")/pdf-download.js" "$INPUT" "$PDF_FILE"; then
+            echo "Error: Failed to download PDF even with Puppeteer fallback."
+            exit 1
+        fi
     fi
 else
     # Assume local path

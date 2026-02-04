@@ -2102,7 +2102,18 @@ async function startChatInterface(page, browser) {
       console.log(chalk.cyan('  #pdf <url_or_path>') + chalk.dim(' - Extract text from a remote or local PDF and inline.'));
       console.log(chalk.cyan('  @include <path>') + chalk.dim('    - Inline content of a local file.'));
       console.log(chalk.cyan('  ~ <prompt>') + chalk.dim('          - Request a concise, one-sentence response.'));
-      console.log(chalk.cyan('  /models') + chalk.dim('              - View or switch between AI Mode, Fast, or Pro.'));
+      console.log('');
+      render();
+      return;
+    }
+
+    if (input.toLowerCase() === '/commands') {
+      console.log(chalk.magenta('\nAvailable Commands:'));
+      console.log(chalk.cyan('  /chats  ') + chalk.dim(' - Switch between recent chats or start a new one.'));
+      console.log(chalk.cyan('  /models ') + chalk.dim(' - View or switch between AI Mode, Gemini Fast, or Pro.'));
+      console.log(chalk.cyan('  /tools  ') + chalk.dim(' - List available expansion tools (#pdf, #transcript, etc).'));
+      console.log(chalk.cyan('  /commands') + chalk.dim('- Show this list of commands.'));
+      console.log(chalk.cyan('  exit    ') + chalk.dim(' - Close the CLI.'));
       console.log('');
       render();
       return;

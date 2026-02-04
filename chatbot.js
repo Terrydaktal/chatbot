@@ -1850,12 +1850,6 @@ async function startChatInterface(page, browser) {
   const computeCursorRows = (plain) => computePosition(plain).row + 1;
 
   let renderedRows = 0;
-  const clearRender = () => {
-    const up = Math.max(0, renderedRows - 1);
-    if (up) stdout.write(`\x1b[${up}A`);
-    stdout.write('\r\x1b[J'); // clear from cursor to end of screen
-    renderedRows = 0;
-  };
 
   // --- composer state ---
   let buffer = '';
@@ -1871,7 +1865,11 @@ async function startChatInterface(page, browser) {
 
   const render = () => {
     stdout.write('\x1b[?25l'); // Hide cursor
-    clearRender();
+
+    // Move to the start of the previously rendered output
+    const up = Math.max(0, renderedRows - 1);
+    if (up) stdout.write(`\x1b[${up}A`);
+    stdout.write('\r'); 
 
     const parts = buffer.split('\n');
     let out;
@@ -1882,7 +1880,8 @@ async function startChatInterface(page, browser) {
     }
 
     stdout.write(out);
-    stdout.write('\x1b[0K'); // clear to end-of-line
+    // Clear from current position to end of screen (handles cases where new output is shorter)
+    stdout.write('\x1b[J'); 
     
     const plainOut = stripAnsi(out);
     const totalPos = computePosition(plainOut);
@@ -1903,14 +1902,10 @@ async function startChatInterface(page, browser) {
 
     // Move cursor relative to the end of the output
     // The write(out) ended at totalPos.row, totalPos.col
-    // But we can just use absolute movement logic since we know the geometry of the block we just printed
-    
-    // Simplest reliable way: Go to bottom line of render, then move up
-    // However, stdout cursor is already at bottom line (totalPos.row)
     
     // 1. Move up if needed
-    const up = totalPos.row - cursorLoc.row;
-    if (up > 0) stdout.write(`\x1b[${up}A`);
+    const moveUp = totalPos.row - cursorLoc.row;
+    if (moveUp > 0) stdout.write(`\x1b[${moveUp}A`);
     
     // 2. Move to correct column
     stdout.write('\r');

@@ -15,6 +15,7 @@ A command-line interface for interacting with Google Gemini and Google AI Mode (
   - **YouTube Transcripts:** `#transcript <url>` pulls transcripts into your prompt.
   - **PDF to Text:** `#pdf <url_or_path>` downloads or reads a PDF and inlines its text into your prompt.
   - **Local File Inclusion:** `@include "filename"` inlines file content.
+  - **One-Sentence Mode:** `~ <prompt>` requests a concise, one-sentence response.
 - **Resilient Automation:** Handles reloads and recovers from stale sessions.
 
 ## Prerequisites
@@ -75,7 +76,6 @@ Start in AI Mode (Google Search AI):
 ### In-Chat Commands
 
 - **Type your prompt:** Just type and press Enter to chat.
-- **~ (One-sentence mode):** Prefix your prompt with `~` to request a concise, one-sentence answer (e.g., `~What is the capital of France?`).
 - **/chats:** Open the menu to switch chats or start a **+ New Chat**.
 - **/tools:** Display a list of all available expansion tools (#pdf, #transcript, etc).
 - **/models:** Display current model or switch between `ai`, `fast`, or `pro`.
@@ -111,9 +111,14 @@ Start in AI Mode (Google Search AI):
   Or local file: #pdf /path/to/local.pdf
   ```
   
-- **File Include:****
+- **File Include:**
   ```text
   Refactor this code: @include "src/main.js"
+  ```
+
+- **One-Sentence Mode:**
+  ```text
+  ~What is the capital of France?
   ```
 
 ## Advanced: AI Mode Script

@@ -2102,7 +2102,80 @@ async function startChatInterface(page, browser) {
       console.log(chalk.cyan('  #pdf <url_or_path>') + chalk.dim(' - Extract text from a remote or local PDF and inline.'));
       console.log(chalk.cyan('  @include <path>') + chalk.dim('    - Inline content of a local file.'));
       console.log(chalk.cyan('  ~ <prompt>') + chalk.dim('          - Request a concise, one-sentence response.'));
+      console.log(chalk.cyan('  /models') + chalk.dim('              - View or switch between AI Mode, Fast, or Pro.'));
       console.log('');
+      render();
+      return;
+    }
+
+    if (input.toLowerCase().startsWith('/models')) {
+      const parts = input.split(/\s+/);
+      if (parts.length === 1) {
+        let current = '';
+        if (options.aiMode) current = 'AI Mode';
+        else if (options.geminiFast) current = 'Gemini Fast (Flash)';
+        else if (options.geminiPro) current = 'Gemini Pro (Advanced)';
+        else current = 'Gemini (Default)';
+
+        console.log(chalk.magenta('\nCurrent Model: ') + chalk.cyan(current));
+        console.log(chalk.magenta('Available Models:'));
+        console.log(chalk.cyan('  /models ai   ') + chalk.dim(' - Switch to Google AI Overviews (Search)'));
+        console.log(chalk.cyan('  /models fast ') + chalk.dim(' - Switch to Gemini Flash'));
+        console.log(chalk.cyan('  /models pro  ') + chalk.dim(' - Switch to Gemini Pro/Advanced'));
+        console.log('');
+      } else {
+        const target = parts[1].toLowerCase();
+        let changed = false;
+        let oldAiMode = options.aiMode;
+
+        if (target === 'ai') {
+          options.aiMode = true;
+          options.geminiFast = false;
+          options.geminiPro = false;
+          changed = true;
+        } else if (target === 'fast' || target === 'flash') {
+          options.aiMode = false;
+          options.geminiFast = true;
+          options.geminiPro = false;
+          changed = true;
+        } else if (target === 'pro' || target === 'advanced') {
+          options.aiMode = false;
+          options.geminiFast = false;
+          options.geminiPro = true;
+          changed = true;
+        } else {
+          console.log(chalk.red(`Unknown model: ${target}`));
+        }
+
+        if (changed) {
+          paused = true;
+          const newUrl = options.aiMode ? AI_MODE_URL : GEMINI_URL;
+          
+          try {
+            if (oldAiMode !== options.aiMode) {
+              console.log(chalk.cyan(`Switching to ${options.aiMode ? 'AI Mode' : 'Gemini'}...`));
+              await page.goto(newUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+              // Re-apply visibility overrides after navigation
+              await applyVisibilityOverride(page);
+              await applyLifecycleOverrides(page);
+            }
+
+            if (!options.aiMode) {
+              if (options.geminiFast) {
+                console.log(chalk.magenta('Ensuring Gemini Fast/Flash model is selected...'));
+                await ensureModel(page, ['Flash', 'Fast']);
+              } else if (options.geminiPro) {
+                console.log(chalk.magenta('Ensuring Gemini Pro/Advanced model is selected...'));
+                await ensureModel(page, ['Advanced', 'Pro', 'Ultra']);
+              }
+            }
+            console.log(chalk.green('Model switched successfully.'));
+          } catch (err) {
+            console.log(chalk.red(`Error switching model: ${err.message}`));
+          }
+          paused = false;
+        }
+      }
       render();
       return;
     }

@@ -74,6 +74,7 @@ Start in AI Mode (Google Search AI):
 ### In-Chat Commands
 
 - **Type your prompt:** Just type and press Enter to chat.
+- **~ (One-sentence mode):** Prefix your prompt with `~` to request a concise, one-sentence answer (e.g., `~What is the capital of France?`).
 - **/chats:** Open the menu to switch chats or start a **+ New Chat**.
 - **exit / quit:** Close the CLI.
 

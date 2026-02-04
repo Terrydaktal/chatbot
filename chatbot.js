@@ -1870,6 +1870,7 @@ async function startChatInterface(page, browser) {
   let carry = '';
 
   const render = () => {
+    stdout.write('\x1b[?25l'); // Hide cursor
     clearRender();
 
     const parts = buffer.split('\n');
@@ -1914,6 +1915,8 @@ async function startChatInterface(page, browser) {
     // 2. Move to correct column
     stdout.write('\r');
     if (cursorLoc.col > 0) stdout.write(`\x1b[${cursorLoc.col}C`);
+    
+    stdout.write('\x1b[?25h'); // Show cursor
   };
 
   const freezeSubmitted = () => {
@@ -2360,6 +2363,7 @@ async function startChatInterface(page, browser) {
 
   // Ensure we restore terminal state on exit
   const cleanup = () => {
+    try { stdout.write('\x1b[?25h'); } catch {} // Ensure cursor is visible
     try { setBracketedPaste(false); } catch {}
     try { stdin.setRawMode(false); } catch {}
   };

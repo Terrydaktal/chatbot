@@ -6,6 +6,7 @@ A command-line interface for interacting with Google Gemini and Google AI Mode (
 
 - **Gemini + AI Mode:** Use Gemini by default or Google AI Mode (Search) with `--ai-mode`.
 - **Terminal-first UI:** Full chat experience in the terminal with Markdown rendering and syntax highlighting.
+- **Smooth Typing:** Optimized rendering engine eliminates flicker and handles long input wrapping correctly.
 - **Persistent Session:** Dedicated profile (`~/.config/chromium-chatbot`) keeps you logged in and isolated.
 - **Fast Completion:** AI Mode finishes as soon as the UI footer appears and strips boilerplate text.
 - **Background-Friendly:** Prevents background throttling; works minimized/hidden on X11.
@@ -75,6 +76,18 @@ Start in AI Mode (Google Search AI):
 - **Type your prompt:** Just type and press Enter to chat.
 - **/chats:** Open the menu to switch chats or start a **+ New Chat**.
 - **exit / quit:** Close the CLI.
+
+### Keyboard Shortcuts
+
+- **Navigation:**
+  - `Left` / `Right`: Move cursor character by character.
+  - `Ctrl + Left` / `Ctrl + Right`: Move cursor word by word.
+  - `Up` / `Down`: Navigate command history.
+- **Editing:**
+  - `Backspace`: Delete character.
+  - `Ctrl + Backspace` / `Ctrl + W`: Delete word.
+  - `Alt + Backspace`: Delete word.
+  - `Ctrl + U`: Clear line.
 
 ### Tools Syntax
 

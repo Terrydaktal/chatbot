@@ -7,6 +7,7 @@
 !chatbot
 !.gitignore
 !transcript
+!pdf-convert
 !chatbot-login
 !package.json
 !package-lock.json

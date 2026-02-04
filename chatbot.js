@@ -2175,6 +2175,28 @@ async function startChatInterface(page, browser) {
       }
     }
 
+    // #pdf expansion
+    const pdfRegex = /#pdf\s+([^\s]+)/g;
+    while ((match = pdfRegex.exec(raw)) !== null) {
+      const fullMatch = match[0];
+      const source = match[1];
+
+      try {
+        const isUrl = source.startsWith('http://') || source.startsWith('https://');
+        console.log(chalk.cyan(isUrl ? `Downloading and converting PDF: ${source}...` : `Converting local PDF: ${source}...`));
+        
+        const pdfConvertPath = path.resolve(__dirname, 'pdf-convert');
+        const cmd = `"${pdfConvertPath}" "${source}"`;
+        const output = execSync(cmd, { encoding: 'utf8' }).trim();
+
+        let expansion = `\n\n--- Content of PDF (${source}) ---\n${output}\n--- End of PDF ---\n`;
+        replacements.push({ original: fullMatch, content: expansion });
+      } catch (err) {
+        console.log(chalk.red(`Error processing PDF ${source}: ${err.message}`));
+        expansionError = true;
+      }
+    }
+
     if (expansionError) return;
 
     for (const rep of replacements) {

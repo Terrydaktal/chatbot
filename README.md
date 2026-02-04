@@ -13,6 +13,7 @@ A command-line interface for interacting with Google Gemini and Google AI Mode (
 - **Chat History & New Chat:** Switch chats or start a new one with `/chats`.
 - **Tools:**
   - **YouTube Transcripts:** `#transcript <url>` pulls transcripts into your prompt.
+  - **PDF to Text:** `#pdf <url_or_path>` downloads or reads a PDF and inlines its text into your prompt.
   - **Local File Inclusion:** `@include "filename"` inlines file content.
 - **Resilient Automation:** Handles reloads and recovers from stale sessions.
 
@@ -100,8 +101,14 @@ Start in AI Mode (Google Search AI):
   - Flags:
     - `--all`: Fetch Title and Description metadata.
     - `--lang "code"`: Fetch specific language (e.g., `--lang "ru"`).
+
+- **PDF Conversion:**
+  ```text
+  Analyze this document: #pdf https://example.com/document.pdf
+  Or local file: #pdf /path/to/local.pdf
+  ```
   
-- **File Include:**
+- **File Include:****
   ```text
   Refactor this code: @include "src/main.js"
   ```

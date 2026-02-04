@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# pdf-convert - Convert a PDF (from URL or local path) to text
+# Usage: pdf-convert <url_or_path>
+
+INPUT="$1"
+
+if [ -z "$INPUT" ]; then
+    echo "Usage: pdf-convert <url_or_path>"
+    exit 1
+fi
+
+if ! command -v pdftotext &> /dev/null; then
+    echo "Error: pdftotext is not installed. Please install poppler-utils."
+    exit 1
+fi
+
+TEMP_DIR=$(mktemp -d)
+trap 'rm -rf "$TEMP_DIR"' EXIT
+
+PDF_FILE=""
+TXT_FILE="$TEMP_DIR/document.txt"
+
+if [[ "$INPUT" =~ ^https?:// ]]; then
+    PDF_FILE="$TEMP_DIR/document.pdf"
+    # Download the PDF
+    if ! curl -L "$INPUT" -o "$PDF_FILE" --silent; then
+        echo "Error: Failed to download PDF from $INPUT"
+        exit 1
+    fi
+else
+    # Assume local path
+    PDF_FILE="$INPUT"
+    if [ ! -f "$PDF_FILE" ]; then
+        echo "Error: Local file not found: $PDF_FILE"
+        exit 1
+    fi
+fi
+
+# Check if it's actually a PDF
+if ! file "$PDF_FILE" | grep -q "PDF document"; then
+    echo "Error: The input is not a valid PDF."
+    exit 1
+fi
+
+# Convert to text
+if ! pdftotext "$PDF_FILE" "$TXT_FILE"; then
+    echo "Error: Failed to convert PDF to text."
+    exit 1
+fi
+
+# Output the text
+cat "$TXT_FILE"

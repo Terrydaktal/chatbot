@@ -2095,6 +2095,18 @@ async function startChatInterface(page, browser) {
       return;
     }
 
+    if (input.toLowerCase() === '/tools') {
+      console.log(chalk.magenta('\nAvailable Tools:'));
+      console.log(chalk.cyan('  #transcript <url>') + chalk.dim(' - Fetch YouTube video transcript.'));
+      console.log(chalk.dim('      Flags: --all (metadata), --lang "code" (specific language)'));
+      console.log(chalk.cyan('  #pdf <url_or_path>') + chalk.dim(' - Extract text from a remote or local PDF.'));
+      console.log(chalk.cyan('  @include <path>') + chalk.dim('    - Inline content of a local file.'));
+      console.log(chalk.cyan('  ~ <prompt>') + chalk.dim('          - Request a concise, one-sentence response.'));
+      console.log('');
+      render();
+      return;
+    }
+
     if (!input) return;
 
     let finalPrompt = raw;

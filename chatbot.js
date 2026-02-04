@@ -241,6 +241,9 @@ function stripAiBoilerplate(md) {
     /Creating a public link(?:\.{3}|\u2026)?/gi,
     /Thank you\s*Your feedback helps\s*Google improve\.?\s*See our Privacy Policy\.?\s*Share more feedback\s*Report a problem\s*Close/gi,
     /Share more feedback\s*Report a problem\s*Close/gi,
+    /Helpful\s*Not helpful\s*Thank you\s*Your feedback helps\s*Google improve\.?\s*See our Privacy Policy\.?/gi,
+    /Rate this answer\s*Helpful\s*Not helpful/gi,
+    /See our Privacy Policy\./gi
   ];
   let cleaned = md;
   for (const pattern of patterns) {
@@ -342,6 +345,14 @@ async function fetchDomMarkdown(page) {
     return await page.evaluate((responseSelector, responseContainerSelector) => {
       function domToMarkdown(node) {
         if (!node) return '';
+        // Skip hidden nodes
+        if (node.nodeType === 1) {
+            if (node.getAttribute('aria-hidden') === 'true') return '';
+            const tag = node.tagName.toLowerCase();
+            if (tag === 'noscript' || tag === 'style' || tag === 'script') return '';
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') return '';
+        }
         let md = '';
         const listStack = [];
 
@@ -934,6 +945,15 @@ async function fetchConversationMessages(page) {
     return await page.evaluate(() => {
       function domToMarkdown(node) {
         if (!node) return '';
+        // Skip hidden nodes
+        if (node.nodeType === 1) {
+            if (node.getAttribute('aria-hidden') === 'true') return '';
+            const tag = node.tagName.toLowerCase();
+            if (tag === 'noscript' || tag === 'style' || tag === 'script') return '';
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') return '';
+        }
+
         let md = '';
         const listStack = [];
         function append(text) { if (text) md += text; }
@@ -1101,18 +1121,49 @@ async function fetchConversationMessages(page) {
 
       const root = document;
 
+      // Define AI containers first so we can exclude user matches inside them
+      const aiContainerSelectors = [
+          'response-container', 
+          'model-response', 
+          '[data-xid="VpUvz"]',
+          '.model-response-text',
+          '.message-content'
+      ];
+
       const userSelectors = [
         'user-message',
         '[data-test-id="user-message"]',
         '.user-message',
         '.user-message-content',
         '[data-xid="aim-mars-input-plate"] textarea',
-        'span.VndcI'
+        // Re-add broad selectors but rely on the filter below to exclude AI-internal matches
+        '.VndcI',
+        '[role="heading"]', // Catch-all for headings, filtered by AI containers
+        '[data-xid="aim-mars-user-turn"]'
       ];
-      // Use Set to avoid duplicate nodes from overlapping selectors
+      
       const rawUserNodes = Array.from(root.querySelectorAll(userSelectors.join(',')));
       const userNodes = rawUserNodes.filter(node => {
-          // Keep only top-level user nodes among the candidates
+          // 1. Must not be inside an AI container
+          if (node.closest(aiContainerSelectors.join(','))) return false;
+
+          // 2. Filter out known UI boilerplate
+          const text = (node.innerText || node.textContent || '').trim();
+          const ignoredPhrases = [
+            'Delete all searches?',
+            'Delete this search?',
+            'AI Mode history',
+            'No AI Mode history',
+            'Recent',
+            'My Ad Centre',
+            'Sign in',
+            'Settings',
+            'Privacy',
+            'Terms'
+          ];
+          if (ignoredPhrases.some(phrase => text === phrase || text.startsWith(phrase))) return false;
+
+          // 3. Keep only top-level user nodes among the candidates
           return !rawUserNodes.some(other => other !== node && other.contains(node));
       });
       
@@ -1122,7 +1173,6 @@ async function fetchConversationMessages(page) {
           '.model-response-text', 
           '.message-content', 
           '.markdown',
-          '[data-xid="aim-mars-turn-root"]',
           '[data-xid="VpUvz"]',
           '.Y3BBE',
           '.mZJni'
@@ -1155,6 +1205,7 @@ async function fetchConversationMessages(page) {
         items.push({ role: 'user', text, node });
       }
 
+      // Process AI nodes
       for (const node of aiNodes) {
         let text = domToMarkdown(node);
         if (!text || !text.trim()) {
@@ -1165,12 +1216,10 @@ async function fetchConversationMessages(page) {
         // Remove trailing "show drafts" or other UI noise
         text = text.replace(/Show drafts\s*$/, '').trim();
         
-        if (seenTexts.has(text)) continue;
-        seenTexts.add(text);
-        
         items.push({ role: 'ai', text, node });
       }
 
+      // Sort by document position
       items.sort((a, b) => {
         if (a.node === b.node) return 0;
         const pos = a.node.compareDocumentPosition(b.node);
@@ -1179,7 +1228,25 @@ async function fetchConversationMessages(page) {
         return 0;
       });
 
-      return items.map(({ role, text }) => ({ role, text }));
+      // Filter consecutive AI messages (keep only the last one in a group)
+      const filtered = [];
+      for (let i = 0; i < items.length; i++) {
+          const current = items[i];
+          const next = items[i + 1];
+          
+          if (current.role === 'ai' && next && next.role === 'ai') {
+              // Skip this AI message because there is another one immediately following it
+              // This handles the "drafts" or "duplicate containers" issue by picking the last one
+              continue;
+          }
+          
+          // Deduplicate based on text content (in case user sends same message twice or similar glitch)
+          // But strict dedup might hide legitimate repeats. 
+          // Let's just trust the "last AI wins" logic for now.
+          filtered.push({ role: current.role, text: current.text });
+      }
+
+      return filtered;
     });
   } catch (e) {
     return [];
@@ -1420,59 +1487,11 @@ async function getBrowser() {
   let browser;
 
   if (options.reload) {
-    console.log(chalk.yellow('Reload requested. Closing existing sessions and processes...'));
-    
-    // 1. Try to close via known session endpoint
-    if (fs.existsSync(SESSION_FILE)) {
-      try {
-        const wsEndpoint = fs.readFileSync(SESSION_FILE, 'utf8').trim();
-        const existingBrowser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint, defaultViewport: null });
-        await existingBrowser.close();
-        console.log(chalk.dim('Closed existing browser session via endpoint.'));
-      } catch (e) {
-        // Ignore if we can't connect/close
-      }
-      fs.unlinkSync(SESSION_FILE);
-    }
-
-    // 2. Kill the specific browser process we started previously
-    if (fs.existsSync(PID_FILE)) {
-      try {
-        const pidStr = fs.readFileSync(PID_FILE, 'utf8').trim();
-        const pid = parseInt(pidStr, 10);
-        if (!isNaN(pid)) {
-          console.log(chalk.dim(`Killing tracked browser process ${pid}...`));
-          try {
-             process.kill(pid, 'SIGTERM');
-             // Wait a moment for process to exit
-             await new Promise(r => setTimeout(r, 1000));
-          } catch(e) {
-             console.log(chalk.dim(`Process ${pid} already exited or cannot be killed.`));
-          }
-        }
-      } catch (e) {
-        console.error(chalk.red('Error reading/killing PID:'), e.message);
-      }
-      // Clean up the PID file
-      try { fs.unlinkSync(PID_FILE); } catch(e) {}
-    }
-
-    // Fallback: Clear SingletonLock if we are sure we are reloading and targeting our profile
-    // (Only if not temp, as temp doesn't use the main lock)
-    if (!options.temp) {
-      const lockFile = path.join(USER_DATA_DIR, 'SingletonLock');
-      if (fs.existsSync(lockFile)) {
-         // We do NOT use fuser here anymore to avoid killing other random Chrome instances.
-         // If the lock persists after killing the specific PID, we assume it's stale and remove it.
-         // But we only remove it if we successfully killed our PID or if we are forced.
-         /* 
-            REMOVED: Deleting SingletonLock manually causes Chromium to detect a crash
-            and reset preferences (search engine, login status) on next boot.
-            We rely on process.kill(SIGTERM) to allow a reasonably clean exit,
-            or let the user handle it if it's truly stuck.
-         */
-      }
-    }
+    console.log(chalk.yellow('Note: The --reload flag is handled by the wrapper script. Connecting to fresh session...'));
+    // We disable the internal reload logic here to prevent Puppeteer from launching a conflicting instance
+    // which can cause profile corruption (resetting login/preferences).
+    // The shell script has already ensured a clean restart.
+    options.reload = false;
   }
 
   // 1. Connect via specified port (Skip if reload is requested, as we want to launch fresh)
@@ -1605,6 +1624,11 @@ function askQuestion(query) {
 async function main() {
   const browser = await getBrowser();
   globalBrowser = browser;
+  
+  browser.on('disconnected', () => {
+    console.log(chalk.yellow('\nBrowser closed. Exiting...'));
+    process.exit(0);
+  });
   
   const pages = await browser.pages();
   console.log(chalk.dim(`Found ${pages.length} open tabs.`));
@@ -1919,6 +1943,36 @@ async function startChatInterface(page, browser) {
     
     cursorPos = newLeft.length;
     buffer = newLeft + right;
+    render();
+  };
+
+  const moveWordLeft = () => {
+    if (cursorPos === 0) return;
+    let i = cursorPos;
+    // If we are at a space, move back until we hit a non-space
+    while (i > 0 && /\s/.test(buffer[i - 1])) {
+      i--;
+    }
+    // Now move back until we hit a space (start of word)
+    while (i > 0 && /[^\s]/.test(buffer[i - 1])) {
+      i--;
+    }
+    cursorPos = i;
+    render();
+  };
+
+  const moveWordRight = () => {
+    if (cursorPos >= buffer.length) return;
+    let i = cursorPos;
+    // Move forward past any word characters
+    while (i < buffer.length && /[^\s]/.test(buffer[i])) {
+      i++;
+    }
+    // Move forward past any spaces
+    while (i < buffer.length && /\s/.test(buffer[i])) {
+      i++;
+    }
+    cursorPos = i;
     render();
   };
 
@@ -2255,6 +2309,14 @@ async function startChatInterface(page, browser) {
       if (s.startsWith('\x1b[A', i)) { histUp(); i += 3; continue; }
       if (s.startsWith('\x1b[B', i)) { histDown(); i += 3; continue; }
 
+      // Ctrl+Left Arrow
+      if (s.startsWith('\x1b[1;5D', i)) { moveWordLeft(); i += 6; continue; }
+      if (s.startsWith('\x1b[5D', i)) { moveWordLeft(); i += 4; continue; }
+
+      // Ctrl+Right Arrow
+      if (s.startsWith('\x1b[1;5C', i)) { moveWordRight(); i += 6; continue; }
+      if (s.startsWith('\x1b[5C', i)) { moveWordRight(); i += 4; continue; }
+
       // Left Arrow
       if (s.startsWith('\x1b[D', i)) {
         if (cursorPos > 0) cursorPos--;
@@ -2314,6 +2376,14 @@ async function fetchDomMarkdownAI(page) {
     return await page.evaluate((responseSelector, responseContainerSelector) => {
       function domToMarkdown(node) {
         if (!node) return '';
+        // Skip hidden nodes
+        if (node.nodeType === 1) {
+            if (node.getAttribute('aria-hidden') === 'true') return '';
+            const tag = node.tagName.toLowerCase();
+            if (tag === 'noscript' || tag === 'style' || tag === 'script') return '';
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') return '';
+        }
         let md = '';
         const listStack = [];
 

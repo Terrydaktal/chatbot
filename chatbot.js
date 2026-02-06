@@ -17,6 +17,7 @@ const TerminalRenderer = require('marked-terminal').default || require('marked-t
 const highlight = require('highlight.js');
 const { execSync } = require('child_process');
 const wrapAnsi = require('wrap-ansi');
+const { buildQuestionAnswerPairs, questionLabel } = require('./lib/questions');
 
 // Configure Markdown Renderer with Highlighting
 const OUTPUT_WIDTH = 88;
@@ -1162,6 +1163,8 @@ async function fetchConversationMessages(page) {
             'Terms'
           ];
           if (ignoredPhrases.some(phrase => text === phrase || text.startsWith(phrase))) return false;
+          // Gemini greeting header sometimes matches our broad selectors.
+          if (/^hi[, ]+lewis[, ]+what is on your mind/i.test(text)) return false;
 
           // 3. Keep only top-level user nodes among the candidates
           return !rawUserNodes.some(other => other !== node && other.contains(node));
@@ -1328,6 +1331,91 @@ async function selectChatFromList(chats) {
         cleanup();
         process.stdout.write('\n');
         resolve(chats[index]);
+        return;
+      }
+      if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
+        cleanup();
+        process.stdout.write('\n');
+        resolve(null);
+      }
+    };
+
+    process.stdout.write('\x1b[?25l');
+    stdin.on('keypress', onKeypress);
+    render();
+  });
+}
+
+async function selectQuestionFromList(pairs) {
+  if (!process.stdin.isTTY) return null;
+  process.stdin.resume();
+
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    readline.emitKeypressEvents(stdin);
+    const wasRaw = stdin.isRaw;
+    if (!wasRaw) stdin.setRawMode(true);
+
+    let index = 0;
+    let renderedLines = 0;
+
+    const render = () => {
+      if (renderedLines > 0) {
+        process.stdout.write(`\x1b[${renderedLines}A`);
+        process.stdout.write('\r');
+        process.stdout.write('\x1b[J');
+      }
+
+      const cols = process.stdout.columns || 80;
+      const rawHeader = `Select question (Up/Down, Enter, Esc) [${pairs.length}]:`;
+      const header = chalk.cyan(stripAnsi(rawHeader).length > cols ? rawHeader.slice(0, Math.max(10, cols - 1)) : rawHeader);
+      console.log(header);
+
+      const maxToShow = Math.min(pairs.length, 12);
+      const start = Math.max(0, Math.min(index - Math.floor(maxToShow / 2), pairs.length - maxToShow));
+      const end = start + maxToShow;
+
+      const prefixLen = 3; // ' > ' or '   '
+
+      for (let i = start; i < end; i++) {
+        const item = pairs[i];
+        const num = (typeof item.num === 'number' && Number.isFinite(item.num)) ? item.num : (i + 1);
+        const numStr = `${num}. `;
+        const maxQuestionWidth = Math.max(1, cols - prefixLen - numStr.length);
+        const q = questionLabel(item.question, maxQuestionWidth);
+        const label = `${numStr}${q}`;
+
+        const prefix = i === index ? ' > ' : '   ';
+        const line = `${prefix}${label}`;
+        if (i === index) console.log(chalk.inverse(line));
+        else console.log(line);
+      }
+
+      renderedLines = 1 + (end - start);
+    };
+
+    const cleanup = () => {
+      if (!wasRaw) stdin.setRawMode(false);
+      stdin.removeListener('keypress', onKeypress);
+      process.stdout.write('\x1b[?25h');
+    };
+
+    const onKeypress = (_str, key) => {
+      if (!key) return;
+      if (key.name === 'up') {
+        index = (index - 1 + pairs.length) % pairs.length;
+        render();
+        return;
+      }
+      if (key.name === 'down') {
+        index = (index + 1) % pairs.length;
+        render();
+        return;
+      }
+      if (key.name === 'return') {
+        cleanup();
+        process.stdout.write('\n');
+        resolve(pairs[index]);
         return;
       }
       if (key.name === 'escape' || (key.ctrl && key.name === 'c')) {
@@ -2107,11 +2195,45 @@ async function startChatInterface(page, browser) {
       return;
     }
 
+    if (input.toLowerCase() === '/questions') {
+      paused = true;
+
+      const conv = await fetchConversationMessages(page);
+      const pairsChrono = buildQuestionAnswerPairs(conv)
+        .filter(p => !/^hi[, ]+lewis[, ]+what is on your mind/i.test((p.question || '').trim()))
+        .map((p, idx) => ({ ...p, num: idx + 1 }));
+      const pairs = pairsChrono.slice().reverse();
+
+      if (!pairs.length) {
+        console.log(chalk.yellow('\nNo questions found in this chat.'));
+      } else {
+        const selected = await selectQuestionFromList(pairs);
+        if (selected) {
+          console.log(chalk.magenta('\nQuestion:\n'));
+          console.log(chalk.bold.green('You > ') + (selected.question || ''));
+          console.log('');
+          console.log(chalk.bold.cyan(options.aiMode ? 'Google AI > ' : 'Gemini > '));
+          if (selected.answer) {
+            const rendered = renderMarkdown(normalizeMarkdown(selected.answer || ''));
+            console.log(rendered.trimEnd());
+          } else {
+            console.log(chalk.dim('(No response captured for this question yet.)'));
+          }
+          console.log('');
+        }
+      }
+
+      paused = false;
+      render();
+      return;
+    }
+
     if (input.toLowerCase() === '/commands') {
       console.log(chalk.magenta('\nAvailable Commands:'));
       console.log(chalk.cyan('  /chats  ') + chalk.dim(' - Switch between recent chats or start a new one.'));
       console.log(chalk.cyan('  /models ') + chalk.dim(' - View or switch between AI Mode, Gemini Fast, or Pro.'));
       console.log(chalk.cyan('  /tools  ') + chalk.dim(' - List available expansion tools (#pdf, #transcript, etc).'));
+      console.log(chalk.cyan('  /questions') + chalk.dim('- Browse questions in this chat and reprint answers.'));
       console.log(chalk.cyan('  /commands') + chalk.dim('- Show this list of commands.'));
       console.log(chalk.cyan('  exit    ') + chalk.dim(' - Close the CLI.'));
       console.log('');
@@ -2197,6 +2319,7 @@ async function startChatInterface(page, browser) {
       console.log(chalk.cyan('  /chats  ') + chalk.dim(' - Switch between recent chats or start a new one.'));
       console.log(chalk.cyan('  /models ') + chalk.dim(' - View or switch between AI Mode, Gemini Fast, or Pro.'));
       console.log(chalk.cyan('  /tools  ') + chalk.dim(' - List available expansion tools (#pdf, #transcript, etc).'));
+      console.log(chalk.cyan('  /questions') + chalk.dim('- Browse questions in this chat and reprint answers.'));
       console.log(chalk.cyan('  /commands') + chalk.dim('- Show this list of commands.'));
       console.log(chalk.cyan('  exit    ') + chalk.dim(' - Close the CLI.'));
       console.log('');

@@ -12,3 +12,7 @@
 !chatbot-login
 !package.json
 !package-lock.json
+!lib/
+!lib/questions.js
+!test/
+!test/questions.test.js

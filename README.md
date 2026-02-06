@@ -79,6 +79,7 @@ Start in AI Mode (Google Search AI):
 - **/chats:** Open the menu to switch chats or start a **+ New Chat**.
 - **/tools:** Display a list of all available expansion tools (#pdf, #transcript, etc).
 - **/models:** Display current model or switch between `ai`, `fast`, or `pro`.
+- **/questions:** Browse questions in the current chat (arrow keys + Enter) and reprint the AI response.
 - **/commands:** Display a list of all available CLI commands.
 - **exit / quit:** Close the CLI.
 

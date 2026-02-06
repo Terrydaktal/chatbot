@@ -2245,13 +2245,17 @@ async function startChatInterface(page, browser) {
         return `${role}: ${(m.text || '').trim()}`;
       }).join('\n\n');
 
-      // 2) Switch to Gemini Fast (Flash).
-      options.aiMode = false;
-      options.geminiFast = true;
-      options.geminiPro = false;
+      const alreadyGeminiFast = !options.aiMode && options.geminiFast;
 
       try {
-        console.log(chalk.cyan('\nSwitching to Gemini Fast (Flash) and starting a new chat for summary...'));
+        console.log(chalk.cyan(`\nStarting a new chat for summary${alreadyGeminiFast ? '' : ' (switching to Gemini Fast/Flash)'}...`));
+
+        if (!alreadyGeminiFast) {
+          options.aiMode = false;
+          options.geminiFast = true;
+          options.geminiPro = false;
+        }
+
         await page.goto(GEMINI_URL, { waitUntil: 'networkidle2', timeout: 60000 });
         await applyVisibilityOverride(page);
         await applyLifecycleOverrides(page);
@@ -2259,8 +2263,10 @@ async function startChatInterface(page, browser) {
         const inputSelector = '.ql-editor, textarea, [contenteditable="true"]';
         await page.waitForSelector(inputSelector, { timeout: 300000 });
 
-        console.log(chalk.magenta('Ensuring Gemini Fast/Flash model is selected...'));
-        await ensureModel(page, ['Flash', 'Fast']);
+        if (!alreadyGeminiFast) {
+          console.log(chalk.magenta('Ensuring Gemini Fast/Flash model is selected...'));
+          await ensureModel(page, ['Flash', 'Fast']);
+        }
       } catch (err) {
         console.log(chalk.red(`Error preparing Gemini Fast new chat: ${err.message}`));
         paused = false;
@@ -2270,7 +2276,7 @@ async function startChatInterface(page, browser) {
 
       // 3) Send summary prompt into a brand new chat.
       const summaryPrompt =
-        'compact and summarise this chat for an ai chatbot:\n\n' +
+        'compact and summarise the following chat an ai chatbot in a token efficient way\n\n' +
         '<chat>\n' +
         transcript +
         '\n</chat>';

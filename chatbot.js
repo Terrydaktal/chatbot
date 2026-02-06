@@ -2228,12 +2228,67 @@ async function startChatInterface(page, browser) {
       return;
     }
 
+    if (input.toLowerCase() === '/summarise' || input.toLowerCase() === '/summarize') {
+      paused = true;
+
+      // 1) Capture current chat transcript before we navigate away.
+      const conv = await fetchConversationMessages(page);
+      if (!conv.length) {
+        console.log(chalk.yellow('\nNo messages found in this chat to summarise.'));
+        paused = false;
+        render();
+        return;
+      }
+
+      const transcript = conv.map((m) => {
+        const role = m.role === 'user' ? 'User' : 'Assistant';
+        return `${role}: ${(m.text || '').trim()}`;
+      }).join('\n\n');
+
+      // 2) Switch to Gemini Fast (Flash).
+      options.aiMode = false;
+      options.geminiFast = true;
+      options.geminiPro = false;
+
+      try {
+        console.log(chalk.cyan('\nSwitching to Gemini Fast (Flash) and starting a new chat for summary...'));
+        await page.goto(GEMINI_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        await applyVisibilityOverride(page);
+        await applyLifecycleOverrides(page);
+
+        const inputSelector = '.ql-editor, textarea, [contenteditable="true"]';
+        await page.waitForSelector(inputSelector, { timeout: 300000 });
+
+        console.log(chalk.magenta('Ensuring Gemini Fast/Flash model is selected...'));
+        await ensureModel(page, ['Flash', 'Fast']);
+      } catch (err) {
+        console.log(chalk.red(`Error preparing Gemini Fast new chat: ${err.message}`));
+        paused = false;
+        render();
+        return;
+      }
+
+      // 3) Send summary prompt into a brand new chat.
+      const summaryPrompt =
+        'compact and summarise this chat for an ai chatbot:\n\n' +
+        '<chat>\n' +
+        transcript +
+        '\n</chat>';
+
+      await sendPromptToGemini(page, summaryPrompt, false);
+
+      paused = false;
+      render();
+      return;
+    }
+
     if (input.toLowerCase() === '/commands') {
       console.log(chalk.magenta('\nAvailable Commands:'));
       console.log(chalk.cyan('  /chats  ') + chalk.dim(' - Switch between recent chats or start a new one.'));
       console.log(chalk.cyan('  /models ') + chalk.dim(' - View or switch between AI Mode, Gemini Fast, or Pro.'));
       console.log(chalk.cyan('  /tools  ') + chalk.dim(' - List available expansion tools (#pdf, #transcript, etc).'));
       console.log(chalk.cyan('  /questions') + chalk.dim('- Browse questions in this chat and reprint answers.'));
+      console.log(chalk.cyan('  /summarise') + chalk.dim('- Start a new Gemini Fast chat summarising the current chat.'));
       console.log(chalk.cyan('  /commands') + chalk.dim('- Show this list of commands.'));
       console.log(chalk.cyan('  exit    ') + chalk.dim(' - Close the CLI.'));
       console.log('');
@@ -2320,6 +2375,7 @@ async function startChatInterface(page, browser) {
       console.log(chalk.cyan('  /models ') + chalk.dim(' - View or switch between AI Mode, Gemini Fast, or Pro.'));
       console.log(chalk.cyan('  /tools  ') + chalk.dim(' - List available expansion tools (#pdf, #transcript, etc).'));
       console.log(chalk.cyan('  /questions') + chalk.dim('- Browse questions in this chat and reprint answers.'));
+      console.log(chalk.cyan('  /summarise') + chalk.dim('- Start a new Gemini Fast chat summarising the current chat.'));
       console.log(chalk.cyan('  /commands') + chalk.dim('- Show this list of commands.'));
       console.log(chalk.cyan('  exit    ') + chalk.dim(' - Close the CLI.'));
       console.log('');

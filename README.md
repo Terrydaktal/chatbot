@@ -80,6 +80,7 @@ Start in AI Mode (Google Search AI):
 - **/tools:** Display a list of all available expansion tools (#pdf, #transcript, etc).
 - **/models:** Display current model or switch between `ai`, `fast`, or `pro`.
 - **/questions:** Browse questions in the current chat (arrow keys + Enter) and reprint the AI response.
+- **/summarise:** Copy the current chat into a new Gemini Flash (fast) chat and ask it to summarise the conversation.
 - **/commands:** Display a list of all available CLI commands.
 - **exit / quit:** Close the CLI.
 

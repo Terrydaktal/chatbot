@@ -4,6 +4,23 @@
 CHROMIUM_BIN="/bin/chromium"
 PORT="${PORT:-9233}"
 
+# Resolve script directory (handling symlinks)
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
+  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
+done
+SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
+
+# Fast path for version queries: do not launch Chromium.
+for arg in "$@"; do
+  if [ "$arg" == "--version" ] || [ "$arg" == "-V" ]; then
+    "$SCRIPT_DIR/chatbot.js" --version
+    exit $?
+  fi
+done
+
 # Check if --reload is passed
 RELOAD=0
 for arg in "$@"; do
@@ -51,23 +68,13 @@ if ! lsof -i:$PORT -sTCP:LISTEN > /dev/null; then
         > /dev/null 2>&1 &
     
     # Save PID for chatbot.js to manage
-    echo $! > "$(dirname "$0")/.chatbot-pid"
+    echo $! > "$SCRIPT_DIR/.chatbot-pid"
     
     echo "Waiting for Chromium to initialize..."
     sleep 2
 else
     echo "Chromium is already running on port $PORT."
 fi
-
-
-# Resolve script directory (handling symlinks)
-SOURCE="${BASH_SOURCE[0]}"
-while [ -h "$SOURCE" ]; do # resolve $SOURCE until the file is no longer a symlink
-  DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
-  SOURCE="$(readlink "$SOURCE")"
-  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE" # if $SOURCE was a relative symlink, we need to resolve it relative to the path where the symlink file was located
-done
-SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 
 echo "Starting Chatbot..."
 "$SCRIPT_DIR/chatbot.js" --port $PORT "$@"

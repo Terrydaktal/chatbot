@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+const VERSION = '1.0.0';
+if (process.argv.includes('--version') || process.argv.includes('-V')) {
+  console.log(VERSION);
+  process.exit(0);
+}
+
 const puppeteerCore = require('puppeteer-core');
 const { addExtra } = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
@@ -1504,6 +1510,9 @@ OPTIONS
 
     --help
         Display this help message.
+
+    --version
+        Print the chatbot version and exit.
 
 OPERATION
     The chatbot connects to a Chromium instance (either existing or new) and automates

@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
-const VERSION = '1.0.0';
 if (process.argv.includes('--version') || process.argv.includes('-V')) {
-  console.log(VERSION);
+  console.log(process.env.CHATBOT_VERSION || 'unknown');
   process.exit(0);
 }
 

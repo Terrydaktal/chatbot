@@ -3,6 +3,7 @@
 
 CHROMIUM_BIN="/bin/chromium"
 PORT="${PORT:-9233}"
+VERSION="1.0.0"
 
 # Resolve script directory (handling symlinks)
 SOURCE="${BASH_SOURCE[0]}"
@@ -16,8 +17,8 @@ SCRIPT_DIR="$( cd -P "$( dirname "$SOURCE" )" >/dev/null 2>&1 && pwd )"
 # Fast path for version queries: do not launch Chromium.
 for arg in "$@"; do
   if [ "$arg" == "--version" ] || [ "$arg" == "-V" ]; then
-    "$SCRIPT_DIR/chatbot.js" --version
-    exit $?
+    echo "$VERSION"
+    exit 0
   fi
 done
 
@@ -77,4 +78,4 @@ else
 fi
 
 echo "Starting Chatbot..."
-"$SCRIPT_DIR/chatbot.js" --port $PORT "$@"
+CHATBOT_VERSION="$VERSION" "$SCRIPT_DIR/chatbot.js" --port $PORT "$@"

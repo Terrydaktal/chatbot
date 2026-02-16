@@ -1507,6 +1507,9 @@ OPTIONS
     --reload
         Force a page reload on startup. Useful if the browser session has timed out.
 
+    --virtual
+        Launch browser in a virtual X display (wrapper flag; best used with --reload).
+
     --help
         Display this help message.
 
@@ -1572,6 +1575,7 @@ program
   .option('--temp', 'Use a temporary profile instead of the default one')
   .option('--port <number>', 'Connect to an existing browser on the specified remote debugging port')
   .option('--reload', 'Force a page reload on startup to ensure a fresh session')
+  .option('--virtual', 'Launch browser in a virtual X display (handled by wrapper)')
   .helpOption(false)
   .allowUnknownOption(true)
   .parse(process.argv);

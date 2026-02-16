@@ -24,6 +24,7 @@ A command-line interface for interacting with Google Gemini and Google AI Mode (
 - Chromium or Google Chrome installed
 - `lsof` (port checking)
 - `xdpyinfo` (X server checking)
+- `xvfb-run` (optional; for `--virtual`)
 - `yt-dlp` (optional; for transcript fetching)
 
 ## Installation
@@ -71,6 +72,7 @@ Start in AI Mode (Google Search AI):
 - `--temp`: Use a temporary browser profile (no persistence).
 - `--port <number>`: Connect to an existing Chrome/Chromium remote-debugging port.
 - `--reload`: Force a complete restart of the browser process (useful if it freezes).
+- `--virtual`: Launch Chromium in a virtual X display (best with `--reload`).
 - `--help`: Show CLI help.
 
 ### In-Chat Commands

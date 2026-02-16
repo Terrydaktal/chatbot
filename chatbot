@@ -22,13 +22,23 @@ for arg in "$@"; do
   fi
 done
 
-# Check if --reload is passed
+# Parse wrapper flags and keep remaining args for chatbot.js
 RELOAD=0
+VIRTUAL=0
+FORWARD_ARGS=()
 for arg in "$@"; do
-  if [ "$arg" == "--reload" ]; then
-    RELOAD=1
-    break
-  fi
+  case "$arg" in
+    --reload)
+      RELOAD=1
+      FORWARD_ARGS+=("$arg")
+      ;;
+    --virtual)
+      VIRTUAL=1
+      ;;
+    *)
+      FORWARD_ARGS+=("$arg")
+      ;;
+  esac
 done
 
 # Handle reload: Kill existing process if requested
@@ -49,25 +59,46 @@ fi
 
 # Check if port is already in use (It shouldn't be if we just reloaded, or if it wasn't running)
 if ! lsof -i:$PORT -sTCP:LISTEN > /dev/null; then
-    echo "Launching Chromium with chromium-chatbot profile on port $PORT..."
-    
-    # Ensure environment is set for X11 (essential for SSH usage)
-    export DISPLAY="${DISPLAY:-:0}"
-    export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
+    if [ $VIRTUAL -eq 1 ]; then
+        if ! command -v xvfb-run > /dev/null 2>&1; then
+            echo "Error: --virtual requires xvfb-run (Xvfb)."
+            exit 1
+        fi
+        echo "Launching Chromium in a virtual X display on port $PORT..."
+        # Launch inside an isolated Xvfb display so no desktop window is focused.
+        setsid xvfb-run -a --server-args="-screen 0 1920x1080x24 -nolisten tcp" \
+            $CHROMIUM_BIN \
+            --user-data-dir=/home/lewis/.config/chromium-chatbot \
+            --remote-debugging-port=$PORT \
+            --start-minimized \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-background-timer-throttling \
+            --disable-renderer-backgrounding \
+            --disable-backgrounding-occluded-windows \
+            --disable-features=CalculateNativeWinOcclusion \
+            > /dev/null 2>&1 &
+    else
+        echo "Launching Chromium with chromium-chatbot profile on port $PORT..."
+        
+        # Ensure environment is set for X11 (essential for SSH usage)
+        export DISPLAY="${DISPLAY:-:0}"
+        export XAUTHORITY="${XAUTHORITY:-$HOME/.Xauthority}"
 
-    # Flags prevent background throttling when the window is minimized/occluded.
-    # Use setsid to run in a new session, completely detaching from the terminal's process group.
-    setsid $CHROMIUM_BIN \
-        --user-data-dir=/home/lewis/.config/chromium-chatbot \
-        --remote-debugging-port=$PORT \
-        --start-minimized \
-        --no-first-run \
-        --no-default-browser-check \
-        --disable-background-timer-throttling \
-        --disable-renderer-backgrounding \
-        --disable-backgrounding-occluded-windows \
-        --disable-features=CalculateNativeWinOcclusion \
-        > /dev/null 2>&1 &
+        # Flags prevent background throttling when the window is minimized/occluded.
+        # Use setsid to run in a new session, completely detaching from the terminal's process group.
+        setsid $CHROMIUM_BIN \
+            --user-data-dir=/home/lewis/.config/chromium-chatbot \
+            --remote-debugging-port=$PORT \
+            --start-minimized \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-background-timer-throttling \
+            --disable-renderer-backgrounding \
+            --disable-backgrounding-occluded-windows \
+            --disable-features=CalculateNativeWinOcclusion \
+            > /dev/null 2>&1 &
+    fi
     
     # Save PID for chatbot.js to manage
     echo $! > "$SCRIPT_DIR/.chatbot-pid"
@@ -79,4 +110,4 @@ else
 fi
 
 echo "Starting Chatbot..."
-CHATBOT_VERSION="$VERSION" "$SCRIPT_DIR/chatbot.js" --port $PORT "$@"
+CHATBOT_VERSION="$VERSION" "$SCRIPT_DIR/chatbot.js" --port $PORT "${FORWARD_ARGS[@]}"

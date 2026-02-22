@@ -847,28 +847,47 @@ async function fetchRecentChats(page, options = {}) {
         try {
             let clicks = 0;
             while (clicks < 10) {
-                // Try finding by class or aria-label
-                const showMore = await page.$('button.EBNOJf, button[aria-label="See more AI Mode saved searches"]');
-                if (!showMore) break;
+                // Find by class, aria-label, OR text content
+                const showMore = await page.evaluateHandle(() => {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    return buttons.find(b => 
+                        b.classList.contains('EBNOJf') || 
+                        (b.getAttribute('aria-label') || '').includes('See more AI Mode') ||
+                        b.innerText.includes('Show more')
+                    );
+                });
+
+                if (!showMore || !showMore.asElement()) {
+                    if (clicks === 0) console.log(chalk.dim('No "Show more" button found initially.'));
+                    break;
+                }
+                
+                const button = showMore.asElement();
                 
                 // Check if it's visible/clickable
-                const isVisible = await showMore.evaluate(el => {
+                const isVisible = await button.evaluate(el => {
                     const style = window.getComputedStyle(el);
                     return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
                 });
-                if (!isVisible) break;
 
-                console.log(chalk.dim(`Clicking "Show more" (iteration ${clicks + 1}) to expose more history...`));
+                if (!isVisible) {
+                    console.log(chalk.dim('Expansion complete (button hidden).'));
+                    break;
+                }
+
+                console.log(chalk.dim(`Clicking "Show more" (iteration ${clicks + 1})...`));
                 
                 // Scroll into view
-                await showMore.evaluate(el => el.scrollIntoView({ block: 'center' }));
+                await button.evaluate(el => el.scrollIntoView({ block: 'center' }));
                 await new Promise(r => setTimeout(r, 500));
 
-                await showMore.click();
-                await new Promise(r => setTimeout(r, 1500)); // Wait for content to load
+                await button.click();
+                await new Promise(r => setTimeout(r, 2000)); // Increased wait for load
                 clicks++;
             }
-        } catch(e) {}
+        } catch(e) {
+            console.log(chalk.dim(`Expansion error: ${e.message}`));
+        }
 
         return await page.evaluate((itemSelector) => {
             const results = [];

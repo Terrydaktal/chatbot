@@ -843,13 +843,24 @@ async function fetchRecentChats(page, options = {}) {
             }
         }
 
-        // Expose all chats by clicking "Show more" if available
+        // Expose more chats by clicking "Show more" repeatedly
         try {
-            const showMore = await page.$(AI_MODE_SHOW_MORE_SELECTOR);
-            if (showMore) {
-                console.log(chalk.dim('Clicking "Show more" to expose full history...'));
+            let clicks = 0;
+            while (clicks < 10) {
+                const showMore = await page.$(AI_MODE_SHOW_MORE_SELECTOR);
+                if (!showMore) break;
+                
+                // Check if it's visible/clickable
+                const isVisible = await showMore.evaluate(el => {
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
+                });
+                if (!isVisible) break;
+
+                console.log(chalk.dim(`Clicking "Show more" (iteration ${clicks + 1}) to expose more history...`));
                 await showMore.click();
-                await new Promise(r => setTimeout(r, 1000));
+                await new Promise(r => setTimeout(r, 1200)); // Wait for content to load
+                clicks++;
             }
         } catch(e) {}
 

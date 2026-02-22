@@ -843,6 +843,16 @@ async function fetchRecentChats(page, options = {}) {
             }
         }
 
+        // Expose all chats by clicking "Show more" if available
+        try {
+            const showMore = await page.$(AI_MODE_SHOW_MORE_SELECTOR);
+            if (showMore) {
+                console.log(chalk.dim('Clicking "Show more" to expose full history...'));
+                await showMore.click();
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        } catch(e) {}
+
         return await page.evaluate((itemSelector) => {
             const results = [];
             const seen = new Set();
@@ -856,7 +866,7 @@ async function fetchRecentChats(page, options = {}) {
                 seen.add(key);
                 results.push({ title, href: '', clickIndex: index });
             });
-            return results.slice(0, 30);
+            return results.slice(0, 100);
         }, AI_MODE_HISTORY_ITEM_SELECTOR);
     }
 
@@ -906,7 +916,7 @@ async function fetchRecentChats(page, options = {}) {
           });
       });
 
-      if (items.length > 0) return items.slice(0, 30);
+      if (items.length > 0) return items.slice(0, 100);
 
       // Strategy 2: Fallback to finding links (older UI or different view)
       const navRoot = document.querySelector('side-navigation-v2') ||
@@ -939,7 +949,7 @@ async function fetchRecentChats(page, options = {}) {
         items.push({ title, href, clickIndex: -1 });
       }
 
-      return items.slice(0, 30);
+      return items.slice(0, 100);
     });
   } catch (e) {
     return [];
@@ -1452,6 +1462,7 @@ const AI_RESPONSE_CONTAINER_SELECTOR = '[data-xid="aim-mars-turn-root"]';
 const AI_SEND_SELECTORS = ['button[aria-label="Send"]', 'button[data-xid="input-plate-send-button"]', '.OEueve'];
 const AI_MODE_HISTORY_BUTTON_SELECTOR = 'button.UTNPFf[aria-label="AI Mode history"]';
 const AI_MODE_HISTORY_ITEM_SELECTOR = 'button.qqMZif[data-thread-id]';
+const AI_MODE_SHOW_MORE_SELECTOR = 'button.EBNOJf';
 
 const streamHandlers = {
   onNewChunk: null,

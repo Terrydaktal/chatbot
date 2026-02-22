@@ -847,7 +847,8 @@ async function fetchRecentChats(page, options = {}) {
         try {
             let clicks = 0;
             while (clicks < 10) {
-                const showMore = await page.$(AI_MODE_SHOW_MORE_SELECTOR);
+                // Try finding by class or aria-label
+                const showMore = await page.$('button.EBNOJf, button[aria-label="See more AI Mode saved searches"]');
                 if (!showMore) break;
                 
                 // Check if it's visible/clickable
@@ -858,8 +859,13 @@ async function fetchRecentChats(page, options = {}) {
                 if (!isVisible) break;
 
                 console.log(chalk.dim(`Clicking "Show more" (iteration ${clicks + 1}) to expose more history...`));
+                
+                // Scroll into view
+                await showMore.evaluate(el => el.scrollIntoView({ block: 'center' }));
+                await new Promise(r => setTimeout(r, 500));
+
                 await showMore.click();
-                await new Promise(r => setTimeout(r, 1200)); // Wait for content to load
+                await new Promise(r => setTimeout(r, 1500)); // Wait for content to load
                 clicks++;
             }
         } catch(e) {}

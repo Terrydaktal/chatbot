@@ -1955,9 +1955,14 @@ async function startChatInterface(page, browser) {
     process.exit(1);
   }
 
-  const promptAnsi = chalk.bold.green('You > ');
-  const promptPlainLen = stripAnsi(promptAnsi).length;
-  const contIndent = ' '.repeat(promptPlainLen);
+  let responseMode = 'verbose';
+  const getPromptAnsi = () => (
+    responseMode === 'concise'
+      ? chalk.bold.green('You > ~ ')
+      : chalk.bold.green('You > ')
+  );
+  const getPromptPlainLen = () => stripAnsi(getPromptAnsi()).length;
+  const getContIndent = () => ' '.repeat(getPromptPlainLen());
 
   const setBracketedPaste = (enabled) => {
     stdout.write(enabled ? '\x1b[?2004h' : '\x1b[?2004l');
@@ -2027,6 +2032,8 @@ async function startChatInterface(page, browser) {
     stdout.write('\r'); 
 
     const parts = buffer.split('\n');
+    const promptAnsi = getPromptAnsi();
+    const contIndent = getContIndent();
     let out;
     if (parts.length <= 1) {
       out = promptAnsi + (parts[0] || '');
@@ -2347,10 +2354,38 @@ async function startChatInterface(page, browser) {
       return;
     }
 
+    if (input.toLowerCase().startsWith('/mode')) {
+      const parts = input.split(/\s+/).filter(Boolean);
+      if (parts.length === 1 || parts[1].toLowerCase() === 'toggle') {
+        responseMode = responseMode === 'concise' ? 'verbose' : 'concise';
+      } else {
+        const target = parts[1].toLowerCase();
+        if (target === 'concise' || target === 'verbose') {
+          responseMode = target;
+        } else {
+          console.log(chalk.red(`Unknown mode: ${parts[1]}`));
+          console.log(chalk.cyan('Usage: /mode [concise|verbose|toggle]'));
+          console.log('');
+          render();
+          return;
+        }
+      }
+      console.log(chalk.magenta('\nResponse Mode: ') + chalk.cyan(responseMode));
+      if (responseMode === 'concise') {
+        console.log(chalk.dim('Concise mode enabled: input is auto-prefixed with "~".'));
+      } else {
+        console.log(chalk.dim('Verbose mode enabled: input is sent as typed.'));
+      }
+      console.log('');
+      render();
+      return;
+    }
+
     if (input.toLowerCase() === '/commands') {
       console.log(chalk.magenta('\nAvailable Commands:'));
       console.log(chalk.cyan('  /chats  ') + chalk.dim(' - Switch between recent chats or start a new one.'));
       console.log(chalk.cyan('  /models ') + chalk.dim(' - View or switch between AI Mode, Gemini Fast, or Pro.'));
+      console.log(chalk.cyan('  /mode   ') + chalk.dim(' - Toggle response mode between concise and verbose.'));
       console.log(chalk.cyan('  /tools  ') + chalk.dim(' - List available expansion tools (#pdf, #transcript, etc).'));
       console.log(chalk.cyan('  /questions') + chalk.dim('- Browse questions in this chat and reprint answers.'));
       console.log(chalk.cyan('  /summarise') + chalk.dim('- Start a new Gemini Fast chat summarising the current chat.'));
@@ -2438,6 +2473,7 @@ async function startChatInterface(page, browser) {
       console.log(chalk.magenta('Available Commands:'));
       console.log(chalk.cyan('  /chats  ') + chalk.dim(' - Switch between recent chats or start a new one.'));
       console.log(chalk.cyan('  /models ') + chalk.dim(' - View or switch between AI Mode, Gemini Fast, or Pro.'));
+      console.log(chalk.cyan('  /mode   ') + chalk.dim(' - Toggle response mode between concise and verbose.'));
       console.log(chalk.cyan('  /tools  ') + chalk.dim(' - List available expansion tools (#pdf, #transcript, etc).'));
       console.log(chalk.cyan('  /questions') + chalk.dim('- Browse questions in this chat and reprint answers.'));
       console.log(chalk.cyan('  /summarise') + chalk.dim('- Start a new Gemini Fast chat summarising the current chat.'));
@@ -2451,6 +2487,9 @@ async function startChatInterface(page, browser) {
     if (!input) return;
 
     let finalPrompt = raw;
+    if (responseMode === 'concise' && !finalPrompt.startsWith('~')) {
+      finalPrompt = `~ ${finalPrompt}`;
+    }
     let isOneSentenceMode = false;
 
     if (finalPrompt.startsWith('~')) {

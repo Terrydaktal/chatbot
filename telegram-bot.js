@@ -372,23 +372,73 @@ function shouldHandleMessage(message) {
 
   if (message.reply_to_message) return true;
 
-  const body = `${message.text || ''} ${message.caption || ''}`.trim();
+  const { text, entities } = getMessageTextData(message);
+  const body = (text || '').trim();
   if (!body) return false;
   if (!TELEGRAM_TRIGGER_USERNAME) return false;
+
+  if (entities.some((entity) => isTriggerMentionEntity(entity, text))) return true;
 
   const mentionRegex = new RegExp(`(^|\\s)@${escapeRegex(TELEGRAM_TRIGGER_USERNAME)}\\b`, 'i');
   return mentionRegex.test(body);
 }
 
 function extractPrompt(message) {
-  let body = `${message.text || ''} ${message.caption || ''}`.trim();
+  const { text, entities } = getMessageTextData(message);
+  let body = (text || '').trim();
   if (!body) return '';
 
   if (TELEGRAM_TRIGGER_USERNAME) {
-    const mentionRegex = new RegExp(`(^|\\s)@${escapeRegex(TELEGRAM_TRIGGER_USERNAME)}\\b`, 'ig');
-    body = body.replace(mentionRegex, ' ').replace(/\s+/g, ' ').trim();
+    body = stripTriggerMentionsByEntity(body, entities);
+    if (body) {
+      const mentionRegex = new RegExp(`(^|\\s)@${escapeRegex(TELEGRAM_TRIGGER_USERNAME)}\\b`, 'ig');
+      body = body.replace(mentionRegex, ' ').replace(/\s+/g, ' ').trim();
+    }
   }
   return body;
+}
+
+function getMessageTextData(message) {
+  if (typeof message.text === 'string') {
+    return {
+      text: message.text,
+      entities: Array.isArray(message.entities) ? message.entities : [],
+    };
+  }
+  if (typeof message.caption === 'string') {
+    return {
+      text: message.caption,
+      entities: Array.isArray(message.caption_entities) ? message.caption_entities : [],
+    };
+  }
+  return { text: '', entities: [] };
+}
+
+function isTriggerMentionEntity(entity, sourceText) {
+  if (!entity || entity.type !== 'mention') return false;
+  const offset = Number(entity.offset);
+  const length = Number(entity.length);
+  if (!Number.isInteger(offset) || !Number.isInteger(length) || length <= 1 || offset < 0) return false;
+  const raw = (sourceText || '').slice(offset, offset + length);
+  if (!raw.startsWith('@')) return false;
+  return raw.slice(1).toLowerCase() === TELEGRAM_TRIGGER_USERNAME;
+}
+
+function stripTriggerMentionsByEntity(text, entities) {
+  if (!text || !TELEGRAM_TRIGGER_USERNAME || !Array.isArray(entities) || !entities.length) return text;
+  const ranges = [];
+  for (const entity of entities) {
+    if (!isTriggerMentionEntity(entity, text)) continue;
+    ranges.push([entity.offset, entity.offset + entity.length]);
+  }
+  if (!ranges.length) return text;
+
+  ranges.sort((a, b) => b[0] - a[0]);
+  let out = text;
+  for (const [start, end] of ranges) {
+    out = out.slice(0, start) + out.slice(end);
+  }
+  return out.replace(/\s+/g, ' ').trim();
 }
 
 function isNewChatCommand(text, botUsername) {

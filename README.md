@@ -146,8 +146,9 @@ Use `--help` for all flags (connect to existing Chrome, reuse target, etc.).
 - `/newchat` starts a fresh chat in the current model.
 - `/chats` returns a numbered list of recent Gemini chats.
 - `/chat <number>` switches to a chat from the latest `/chats` list for that Telegram chat.
+- `/whoami` shows your Telegram `user_id` (plus username/chat ID).
 - `/model` shows current model for that Telegram chat.
-- `/model fast` or `/model ai` switches between Gemini Fast and AI Mode.
+- `/model geminifast` or `/model aimode` switches between Gemini Fast and AI Mode.
 - A message is processed when:
   - It contains `@TELEGRAM_TRIGGER_USERNAME`, or
   - It is a reply to another message.
@@ -162,10 +163,11 @@ Use `--help` for all flags (connect to existing Chrome, reuse target, etc.).
 - `BROWSER_PORT` (optional, default `9233`): Chromium remote debugging port.
 - `GEMINI_URL` (optional): Override Gemini URL.
 - `AI_MODE_URL` (optional): Override AI Mode URL.
-- `TELEGRAM_DEFAULT_MODEL` (optional, default `fast`): Initial model per Telegram chat.
+- `TELEGRAM_DEFAULT_MODEL` (optional, default `geminifast`): Initial model per Telegram chat.
 - `TELEGRAM_DEFAULT_MODE` (optional): Backward-compatible alias for `TELEGRAM_DEFAULT_MODEL`.
 - `TELEGRAM_POLL_TIMEOUT_SECONDS` (optional, default `30`): Telegram long-poll timeout.
 - `TELEGRAM_ALLOWED_CHAT_IDS` (optional): Comma-separated allowlist of chat IDs.
+- `TELEGRAM_ALLOWED_USER_IDS` (optional): Comma-separated allowlist of Telegram numeric user IDs. If set, only those users can interact with the bot.
 
 ### Run
 

@@ -8,13 +8,14 @@ const TELEGRAM_TRIGGER_USERNAME = (process.env.TELEGRAM_TRIGGER_USERNAME || '')
   .replace(/^@/, '')
   .toLowerCase();
 const TELEGRAM_ALLOWED_CHAT_IDS = parseAllowedChatIds(process.env.TELEGRAM_ALLOWED_CHAT_IDS || '');
+const TELEGRAM_ALLOWED_USER_IDS = parseAllowedUserIds(process.env.TELEGRAM_ALLOWED_USER_IDS || '');
 const BROWSER_PORT = Number(process.env.BROWSER_PORT || 9233);
 const GEMINI_URL = process.env.GEMINI_URL || 'https://gemini.google.com/app?hl=en-gb';
 const AI_MODE_URL = process.env.AI_MODE_URL || 'https://www.google.com/search?udm=50&aep=11';
 const POLL_TIMEOUT_SECONDS = Number(process.env.TELEGRAM_POLL_TIMEOUT_SECONDS || 30);
 const DEFAULT_MODEL = normalizeModel(
-  process.env.TELEGRAM_DEFAULT_MODEL || process.env.TELEGRAM_DEFAULT_MODE || 'fast'
-) || 'fast';
+  process.env.TELEGRAM_DEFAULT_MODEL || process.env.TELEGRAM_DEFAULT_MODE || 'geminifast'
+) || 'geminifast';
 
 const INPUT_SELECTORS = [
   '.ITIRGe',
@@ -57,7 +58,7 @@ class GeminiBridge {
   }
 
   getModelConfig(model) {
-    if (model === 'ai') {
+    if (model === 'aimode') {
       return {
         url: this.urls.ai,
         inputSelectors: AI_INPUT_SELECTORS,
@@ -82,7 +83,7 @@ class GeminiBridge {
     }
 
     const currentUrl = this.page.url() || '';
-    const isOnModeSurface = model === 'ai'
+    const isOnModeSurface = model === 'aimode'
       ? currentUrl.includes('google.com/search')
       : currentUrl.includes('gemini.google.com');
     const shouldNavigate = newChat || !isOnModeSurface;
@@ -95,7 +96,7 @@ class GeminiBridge {
 
   async startNewChat(model) {
     const page = await this.ensurePage(model, true);
-    if (model === 'fast') {
+    if (model === 'geminifast') {
       await this.ensureGeminiFastSelected(page);
     }
   }
@@ -103,7 +104,7 @@ class GeminiBridge {
   async listRecentChats(model, limit = 20) {
     const page = await this.ensurePage(model, false);
 
-    if (model === 'ai') {
+    if (model === 'aimode') {
       const historyButton = await page.$(AI_MODE_HISTORY_BUTTON_SELECTOR);
       if (historyButton) {
         const initialItems = await page.$$(AI_MODE_HISTORY_ITEM_SELECTOR);
@@ -223,7 +224,7 @@ class GeminiBridge {
 
   async selectChat(chatRef) {
     if (!chatRef) throw new Error('Missing chat reference.');
-    const model = normalizeModel(chatRef.model) || 'fast';
+    const model = normalizeModel(chatRef.model) || 'geminifast';
     const config = this.getModelConfig(model);
     const page = await this.ensurePage(model, false);
 
@@ -249,7 +250,7 @@ class GeminiBridge {
     }
 
     await page.waitForSelector(config.inputSelectors.join(', '), { timeout: 120000 });
-    if (model === 'fast') {
+    if (model === 'geminifast') {
       await this.ensureGeminiFastSelected(page);
     }
   }
@@ -260,7 +261,7 @@ class GeminiBridge {
     const config = this.getModelConfig(model);
 
     const page = await this.ensurePage(model, false);
-    if (model === 'fast') {
+    if (model === 'geminifast') {
       await this.ensureGeminiFastSelected(page);
     }
     const input = await findVisibleInput(page, config.inputSelectors);
@@ -285,7 +286,7 @@ class GeminiBridge {
 
     await input.focus();
     await page.keyboard.type(prompt);
-    if (model === 'ai') {
+    if (model === 'aimode') {
       const clicked = await page.evaluate((selectors) => {
         for (const selector of selectors) {
           const btn = document.querySelector(selector);
@@ -412,10 +413,27 @@ function parseAllowedChatIds(raw) {
   return ids.size ? ids : null;
 }
 
+function parseAllowedUserIds(raw) {
+  if (!raw.trim()) return null;
+  const ids = new Set();
+  for (const part of raw.split(',')) {
+    const trimmed = part.trim();
+    if (trimmed) ids.add(trimmed);
+  }
+  return ids.size ? ids : null;
+}
+
+function isSenderAllowed(message) {
+  if (!TELEGRAM_ALLOWED_USER_IDS || !TELEGRAM_ALLOWED_USER_IDS.size) return true;
+  const senderId = String((message && message.from && message.from.id) || '');
+  return TELEGRAM_ALLOWED_USER_IDS.has(senderId);
+}
+
 function shouldHandleMessage(message) {
   if (!message) return false;
   if (message.from && message.from.is_bot) return false;
   if (TELEGRAM_ALLOWED_CHAT_IDS && !TELEGRAM_ALLOWED_CHAT_IDS.has(String(message.chat.id))) return false;
+  if (!isSenderAllowed(message)) return false;
 
   if (message.reply_to_message) return true;
 
@@ -504,6 +522,14 @@ function isChatsCommand(text, botUsername) {
   return lower === plain || (withBot && lower === withBot);
 }
 
+function isWhoAmICommand(text, botUsername) {
+  const lower = (text || '').trim().toLowerCase();
+  if (!lower) return false;
+  const plain = '/whoami';
+  const withBot = botUsername ? `/whoami@${botUsername.toLowerCase()}` : '';
+  return lower === plain || (withBot && lower === withBot);
+}
+
 function parseChatSelectCommand(text, botUsername) {
   const raw = (text || '').trim();
   if (!raw) return null;
@@ -530,14 +556,14 @@ function parseModelCommand(text, botUsername) {
   if (cmd !== plain && (!withBot || cmd !== withBot)) return null;
   if (parts.length < 2) return { query: true };
   const model = normalizeModel(parts[1]);
-  if (!model) return { error: 'Usage: /model <fast|ai>' };
+  if (!model) return { error: 'Usage: /model <geminifast|aimode>' };
   return { model };
 }
 
 function normalizeModel(value) {
   const v = (value || '').toString().trim().toLowerCase();
-  if (v === 'ai' || v === 'aimode' || v === 'ai-mode') return 'ai';
-  if (v === 'fast' || v === 'flash' || v === 'gemini') return 'fast';
+  if (v === 'ai' || v === 'aimode' || v === 'ai-mode') return 'aimode';
+  if (v === 'geminifast' || v === 'fast' || v === 'flash' || v === 'gemini') return 'geminifast';
   return '';
 }
 
@@ -605,7 +631,8 @@ async function registerTelegramCommands() {
     { command: 'newchat', description: 'Start a fresh chat in current model' },
     { command: 'chats', description: 'List recent chats in current model' },
     { command: 'chat', description: 'Switch chat: /chat <number>' },
-    { command: 'model', description: 'Show or set model: /model fast|ai' },
+    { command: 'whoami', description: 'Show your Telegram user ID' },
+    { command: 'model', description: 'Show or set model: /model geminifast|aimode' },
   ];
   await telegramCall('setMyCommands', { commands });
 }
@@ -642,10 +669,22 @@ async function main() {
         offset = update.update_id + 1;
         const message = update.message;
         if (!message) continue;
+        if (!isSenderAllowed(message)) continue;
 
         const text = (message.text || message.caption || '').trim();
         const telegramChatId = String(message.chat.id);
         const currentModel = modelByTelegramChatId.get(telegramChatId) || DEFAULT_MODEL;
+
+        if (isWhoAmICommand(text, botUsername)) {
+          const userId = String(message.from && message.from.id ? message.from.id : '');
+          const username = message.from && message.from.username ? `@${message.from.username}` : '(none)';
+          await sendReply(
+            message.chat.id,
+            message.message_id,
+            `user_id: ${userId || '(unknown)'}\nusername: ${username}\nchat_id: ${telegramChatId}`
+          );
+          continue;
+        }
 
         const modelCommand = parseModelCommand(text, botUsername);
         if (modelCommand) {

@@ -12,7 +12,9 @@ const BROWSER_PORT = Number(process.env.BROWSER_PORT || 9233);
 const GEMINI_URL = process.env.GEMINI_URL || 'https://gemini.google.com/app?hl=en-gb';
 const AI_MODE_URL = process.env.AI_MODE_URL || 'https://www.google.com/search?udm=50&aep=11';
 const POLL_TIMEOUT_SECONDS = Number(process.env.TELEGRAM_POLL_TIMEOUT_SECONDS || 30);
-const DEFAULT_MODE = normalizeMode(process.env.TELEGRAM_DEFAULT_MODE || 'gemini') || 'gemini';
+const DEFAULT_MODEL = normalizeModel(
+  process.env.TELEGRAM_DEFAULT_MODEL || process.env.TELEGRAM_DEFAULT_MODE || 'fast'
+) || 'fast';
 
 const INPUT_SELECTORS = [
   '.ITIRGe',
@@ -54,8 +56,8 @@ class GeminiBridge {
     });
   }
 
-  getModeConfig(mode) {
-    if (mode === 'ai') {
+  getModelConfig(model) {
+    if (model === 'ai') {
       return {
         url: this.urls.ai,
         inputSelectors: AI_INPUT_SELECTORS,
@@ -71,8 +73,8 @@ class GeminiBridge {
     };
   }
 
-  async ensurePage(mode, newChat = false) {
-    const config = this.getModeConfig(mode);
+  async ensurePage(model, newChat = false) {
+    const config = this.getModelConfig(model);
     await this.ensureConnected();
     if (!this.page || this.page.isClosed()) {
       const pages = await this.browser.pages();
@@ -80,7 +82,7 @@ class GeminiBridge {
     }
 
     const currentUrl = this.page.url() || '';
-    const isOnModeSurface = mode === 'ai'
+    const isOnModeSurface = model === 'ai'
       ? currentUrl.includes('google.com/search')
       : currentUrl.includes('gemini.google.com');
     const shouldNavigate = newChat || !isOnModeSurface;
@@ -91,14 +93,17 @@ class GeminiBridge {
     return this.page;
   }
 
-  async startNewChat(mode) {
-    await this.ensurePage(mode, true);
+  async startNewChat(model) {
+    const page = await this.ensurePage(model, true);
+    if (model === 'fast') {
+      await this.ensureGeminiFastSelected(page);
+    }
   }
 
-  async listRecentChats(mode, limit = 20) {
-    const page = await this.ensurePage(mode, false);
+  async listRecentChats(model, limit = 20) {
+    const page = await this.ensurePage(model, false);
 
-    if (mode === 'ai') {
+    if (model === 'ai') {
       const historyButton = await page.$(AI_MODE_HISTORY_BUTTON_SELECTOR);
       if (historyButton) {
         const initialItems = await page.$$(AI_MODE_HISTORY_ITEM_SELECTOR);
@@ -218,9 +223,9 @@ class GeminiBridge {
 
   async selectChat(chatRef) {
     if (!chatRef) throw new Error('Missing chat reference.');
-    const mode = normalizeMode(chatRef.mode) || 'gemini';
-    const config = this.getModeConfig(mode);
-    const page = await this.ensurePage(mode, false);
+    const model = normalizeModel(chatRef.model) || 'fast';
+    const config = this.getModelConfig(model);
+    const page = await this.ensurePage(model, false);
 
     if (chatRef.href) {
       const targetUrl = chatRef.href.startsWith('http')
@@ -244,14 +249,20 @@ class GeminiBridge {
     }
 
     await page.waitForSelector(config.inputSelectors.join(', '), { timeout: 120000 });
+    if (model === 'fast') {
+      await this.ensureGeminiFastSelected(page);
+    }
   }
 
-  async ask(promptText, mode) {
+  async ask(promptText, model) {
     const prompt = (promptText || '').trim();
     if (!prompt) throw new Error('Empty prompt.');
-    const config = this.getModeConfig(mode);
+    const config = this.getModelConfig(model);
 
-    const page = await this.ensurePage(mode, false);
+    const page = await this.ensurePage(model, false);
+    if (model === 'fast') {
+      await this.ensureGeminiFastSelected(page);
+    }
     const input = await findVisibleInput(page, config.inputSelectors);
     if (!input) throw new Error('Could not find a visible Gemini input field.');
 
@@ -274,7 +285,7 @@ class GeminiBridge {
 
     await input.focus();
     await page.keyboard.type(prompt);
-    if (mode === 'ai') {
+    if (model === 'ai') {
       const clicked = await page.evaluate((selectors) => {
         for (const selector of selectors) {
           const btn = document.querySelector(selector);
@@ -292,6 +303,41 @@ class GeminiBridge {
     await input.dispose();
 
     return waitForGeminiResponse(page, initialCount, prompt, config.responseSelector);
+  }
+
+  async ensureGeminiFastSelected(page) {
+    const modelBadgeSelectors = [
+      '[data-test-id="bard-mode-menu-button"]',
+      'button.input-area-switch',
+      'button[aria-haspopup="menu"]',
+      '.model-selector',
+      'button[data-test-id="model-selector"]',
+    ];
+
+    let modelBadge = null;
+    for (const selector of modelBadgeSelectors) {
+      modelBadge = await page.$(selector);
+      if (modelBadge) break;
+    }
+    if (!modelBadge) return;
+
+    const badgeText = await page.evaluate((el) => (el.innerText || '').trim(), modelBadge).catch(() => '');
+    if (/flash|fast/i.test(badgeText)) return;
+
+    await modelBadge.click().catch(() => {});
+    await sleep(300);
+
+    let targetOption = await page.$('button[data-test-id="bard-mode-option-fast"]');
+    if (!targetOption) {
+      targetOption = await page.evaluateHandle(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        return buttons.find((b) => /flash|fast/i.test((b.innerText || '').trim())) || null;
+      }).then((h) => (h && h.asElement ? h.asElement() : null)).catch(() => null);
+    }
+    if (!targetOption) return;
+
+    await targetOption.click().catch(() => {});
+    await sleep(800);
   }
 }
 
@@ -473,25 +519,25 @@ function parseChatSelectCommand(text, botUsername) {
   return { index };
 }
 
-function parseModeCommand(text, botUsername) {
+function parseModelCommand(text, botUsername) {
   const raw = (text || '').trim();
   if (!raw) return null;
   const parts = raw.split(/\s+/).filter(Boolean);
   if (!parts.length) return null;
   const cmd = parts[0].toLowerCase();
-  const plain = '/mode';
-  const withBot = botUsername ? `/mode@${botUsername.toLowerCase()}` : '';
+  const plain = '/model';
+  const withBot = botUsername ? `/model@${botUsername.toLowerCase()}` : '';
   if (cmd !== plain && (!withBot || cmd !== withBot)) return null;
   if (parts.length < 2) return { query: true };
-  const mode = normalizeMode(parts[1]);
-  if (!mode) return { error: 'Usage: /mode <gemini|ai>' };
-  return { mode };
+  const model = normalizeModel(parts[1]);
+  if (!model) return { error: 'Usage: /model <fast|ai>' };
+  return { model };
 }
 
-function normalizeMode(value) {
+function normalizeModel(value) {
   const v = (value || '').toString().trim().toLowerCase();
   if (v === 'ai' || v === 'aimode' || v === 'ai-mode') return 'ai';
-  if (v === 'gemini') return 'gemini';
+  if (v === 'fast' || v === 'flash' || v === 'gemini') return 'fast';
   return '';
 }
 
@@ -556,10 +602,10 @@ function chunkText(text, maxLen) {
 
 async function registerTelegramCommands() {
   const commands = [
-    { command: 'newchat', description: 'Start a fresh chat in current mode' },
-    { command: 'chats', description: 'List recent chats in current mode' },
+    { command: 'newchat', description: 'Start a fresh chat in current model' },
+    { command: 'chats', description: 'List recent chats in current model' },
     { command: 'chat', description: 'Switch chat: /chat <number>' },
-    { command: 'mode', description: 'Show or set mode: /mode gemini|ai' },
+    { command: 'model', description: 'Show or set model: /model fast|ai' },
   ];
   await telegramCall('setMyCommands', { commands });
 }
@@ -577,12 +623,12 @@ async function main() {
   console.log(`Telegram bot ready as @${botUsername || 'unknown'}.`);
   console.log(`Trigger username: ${TELEGRAM_TRIGGER_USERNAME ? '@' + TELEGRAM_TRIGGER_USERNAME : '(reply-only mode)'}`);
   console.log(`Browser endpoint: http://127.0.0.1:${BROWSER_PORT}`);
-  console.log(`Default mode: ${DEFAULT_MODE}`);
+  console.log(`Default model: ${DEFAULT_MODEL}`);
 
   let offset = 0;
   let queue = Promise.resolve();
   const recentChatsByTelegramChatId = new Map();
-  const modeByTelegramChatId = new Map();
+  const modelByTelegramChatId = new Map();
 
   while (true) {
     try {
@@ -599,35 +645,35 @@ async function main() {
 
         const text = (message.text || message.caption || '').trim();
         const telegramChatId = String(message.chat.id);
-        const currentMode = modeByTelegramChatId.get(telegramChatId) || DEFAULT_MODE;
+        const currentModel = modelByTelegramChatId.get(telegramChatId) || DEFAULT_MODEL;
 
-        const modeCommand = parseModeCommand(text, botUsername);
-        if (modeCommand) {
-          if (modeCommand.error) {
-            await sendReply(message.chat.id, message.message_id, modeCommand.error);
+        const modelCommand = parseModelCommand(text, botUsername);
+        if (modelCommand) {
+          if (modelCommand.error) {
+            await sendReply(message.chat.id, message.message_id, modelCommand.error);
             continue;
           }
-          if (modeCommand.query) {
-            await sendReply(message.chat.id, message.message_id, `Current mode: ${currentMode}`);
+          if (modelCommand.query) {
+            await sendReply(message.chat.id, message.message_id, `Current model: ${currentModel}`);
             continue;
           }
-          modeByTelegramChatId.set(telegramChatId, modeCommand.mode);
-          await sendReply(message.chat.id, message.message_id, `Mode set to ${modeCommand.mode}.`);
+          modelByTelegramChatId.set(telegramChatId, modelCommand.model);
+          await sendReply(message.chat.id, message.message_id, `Model set to ${modelCommand.model}.`);
           continue;
         }
 
         if (isNewChatCommand(text, botUsername)) {
           queue = queue.then(async () => {
-            await bridge.startNewChat(currentMode);
-            await sendReply(message.chat.id, message.message_id, `Started a new ${currentMode} chat.`);
+            await bridge.startNewChat(currentModel);
+            await sendReply(message.chat.id, message.message_id, `Started a new ${currentModel} chat.`);
           }).catch((err) => console.error('newchat error:', err.message));
           continue;
         }
 
         if (isChatsCommand(text, botUsername)) {
           queue = queue.then(async () => {
-            const chats = await bridge.listRecentChats(currentMode, 20);
-            recentChatsByTelegramChatId.set(telegramChatId, chats.map((c) => ({ ...c, mode: currentMode })));
+            const chats = await bridge.listRecentChats(currentModel, 20);
+            recentChatsByTelegramChatId.set(telegramChatId, chats.map((c) => ({ ...c, model: currentModel })));
             await sendReply(message.chat.id, message.message_id, formatChatsReply(chats));
           }).catch(async (err) => {
             console.error('chats error:', err.message);
@@ -680,7 +726,7 @@ async function main() {
 
         queue = queue.then(async () => {
           await telegramCall('sendChatAction', { chat_id: message.chat.id, action: 'typing' });
-          const answer = await bridge.ask(prompt, currentMode);
+          const answer = await bridge.ask(prompt, currentModel);
           await sendReply(message.chat.id, message.message_id, answer);
         }).catch(async (err) => {
           console.error('message error:', err.message);

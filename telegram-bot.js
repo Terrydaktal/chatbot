@@ -265,7 +265,8 @@ class GeminiBridge {
         el.value = '';
       }
       if (el.isContentEditable) {
-        el.innerHTML = '';
+        // Avoid innerHTML writes: Gemini may enforce Trusted Types.
+        el.textContent = '';
       }
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));

@@ -66,6 +66,97 @@ class GeminiBridge {
     await this.ensurePage(true);
   }
 
+  async listRecentChats(limit = 20) {
+    const page = await this.ensurePage(false);
+    const chats = await page.evaluate(() => {
+      const tooltipMap = new Map();
+      const tooltipContainer = document.querySelector('.cdk-describedby-message-container');
+      if (tooltipContainer) {
+        tooltipContainer.querySelectorAll('[id^="cdk-describedby-message"]').forEach((el) => {
+          const text = (el.textContent || '').trim();
+          if (text) tooltipMap.set(el.id, text);
+        });
+      }
+
+      const items = [];
+      const seen = new Set();
+
+      const convItems = Array.from(document.querySelectorAll('[data-test-id="conversation"]'));
+      convItems.forEach((el, index) => {
+        let title = '';
+        const titleEl = el.querySelector('.conversation-title');
+        if (titleEl) title = titleEl.textContent.replace(/\s+/g, ' ').trim();
+        if (!title) {
+          const aria = el.getAttribute('aria-label');
+          if (aria) title = aria.trim();
+        }
+        if (!title) {
+          const describedBy = el.getAttribute('aria-describedby');
+          if (describedBy) title = tooltipMap.get(describedBy) || '';
+        }
+        if (!title) return;
+        const href = el.getAttribute('href') || '';
+        const key = href || `click:${index}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        items.push({ title, href, clickIndex: href ? -1 : index });
+      });
+
+      if (items.length > 0) return items;
+
+      const navRoot = document.querySelector('side-navigation-v2') ||
+        document.querySelector('bard-side-navigation') ||
+        document.querySelector('nav') ||
+        document.body;
+      const links = Array.from(navRoot.querySelectorAll('a[href*="/app/"]'));
+      for (const link of links) {
+        const href = link.getAttribute('href') || link.href || '';
+        if (!href || !href.includes('/app/')) continue;
+        const text = (link.textContent || '').replace(/\s+/g, ' ').trim();
+        const title = text || link.getAttribute('aria-label') || link.getAttribute('title') || '';
+        const key = href;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push({ title: title.trim(), href, clickIndex: -1 });
+      }
+      return items;
+    });
+
+    return chats.slice(0, Math.max(1, limit)).map((c) => ({
+      title: (c.title || '').trim() || 'Untitled chat',
+      href: c.href || '',
+      clickIndex: Number.isInteger(c.clickIndex) ? c.clickIndex : -1,
+    }));
+  }
+
+  async selectChat(chatRef) {
+    if (!chatRef) throw new Error('Missing chat reference.');
+    const page = await this.ensurePage(false);
+
+    if (chatRef.href) {
+      const targetUrl = chatRef.href.startsWith('http')
+        ? chatRef.href
+        : new URL(chatRef.href, this.url).toString();
+      await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+    } else if (Number.isInteger(chatRef.clickIndex) && chatRef.clickIndex >= 0) {
+      const clicked = await page.evaluate((index) => {
+        const items = document.querySelectorAll('[data-test-id="conversation"]');
+        if (!items[index]) return false;
+        items[index].scrollIntoView({ block: 'center' });
+        items[index].click();
+        return true;
+      }, chatRef.clickIndex);
+      if (!clicked) throw new Error('Could not click selected chat item.');
+      try {
+        await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 });
+      } catch {}
+    } else {
+      throw new Error('Selected chat has no usable navigation target.');
+    }
+
+    await page.waitForSelector(INPUT_SELECTORS.join(', '), { timeout: 120000 });
+  }
+
   async ask(promptText) {
     const prompt = (promptText || '').trim();
     if (!prompt) throw new Error('Empty prompt.');
@@ -204,6 +295,29 @@ function isNewChatCommand(text, botUsername) {
   return lower === plain || (withBot && lower === withBot);
 }
 
+function isChatsCommand(text, botUsername) {
+  const lower = (text || '').trim().toLowerCase();
+  if (!lower) return false;
+  const plain = '/chats';
+  const withBot = botUsername ? `/chats@${botUsername.toLowerCase()}` : '';
+  return lower === plain || (withBot && lower === withBot);
+}
+
+function parseChatSelectCommand(text, botUsername) {
+  const raw = (text || '').trim();
+  if (!raw) return null;
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (!parts.length) return null;
+  const cmd = parts[0].toLowerCase();
+  const plain = '/chat';
+  const withBot = botUsername ? `/chat@${botUsername.toLowerCase()}` : '';
+  if (cmd !== plain && (!withBot || cmd !== withBot)) return null;
+  if (parts.length < 2) return { error: 'Usage: /chat <number>' };
+  const index = Number(parts[1]);
+  if (!Number.isInteger(index) || index < 1) return { error: 'Usage: /chat <number>' };
+  return { index };
+}
+
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -241,6 +355,12 @@ async function sendReply(chatId, replyToMessageId, text) {
   }
 }
 
+function formatChatsReply(chats) {
+  if (!chats.length) return 'No recent chats found.';
+  const lines = chats.map((chat, idx) => `${idx + 1}. ${chat.title}`);
+  return `Recent chats:\n${lines.join('\n')}`;
+}
+
 function chunkText(text, maxLen) {
   if (text.length <= maxLen) return [text];
   const chunks = [];
@@ -268,6 +388,7 @@ async function main() {
 
   let offset = 0;
   let queue = Promise.resolve();
+  const recentChatsByTelegramChatId = new Map();
 
   while (true) {
     try {
@@ -289,6 +410,52 @@ async function main() {
             await bridge.startNewChat();
             await sendReply(message.chat.id, message.message_id, 'Started a new Gemini chat.');
           }).catch((err) => console.error('newchat error:', err.message));
+          continue;
+        }
+
+        if (isChatsCommand(text, botUsername)) {
+          queue = queue.then(async () => {
+            const chats = await bridge.listRecentChats(20);
+            recentChatsByTelegramChatId.set(String(message.chat.id), chats);
+            await sendReply(message.chat.id, message.message_id, formatChatsReply(chats));
+          }).catch(async (err) => {
+            console.error('chats error:', err.message);
+            await sendReply(message.chat.id, message.message_id, `Error: ${err.message}`);
+          });
+          continue;
+        }
+
+        const chatSelect = parseChatSelectCommand(text, botUsername);
+        if (chatSelect) {
+          if (chatSelect.error) {
+            await sendReply(message.chat.id, message.message_id, chatSelect.error);
+            continue;
+          }
+          queue = queue.then(async () => {
+            const chats = recentChatsByTelegramChatId.get(String(message.chat.id)) || [];
+            if (!chats.length) {
+              await sendReply(message.chat.id, message.message_id, 'No chat list is cached yet. Run /chats first.');
+              return;
+            }
+            const selected = chats[chatSelect.index - 1];
+            if (!selected) {
+              await sendReply(
+                message.chat.id,
+                message.message_id,
+                `Invalid chat number. Choose 1-${chats.length} from the latest /chats list.`
+              );
+              return;
+            }
+            await bridge.selectChat(selected);
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              `Switched to chat ${chatSelect.index}: ${selected.title}\n(No previous messages were sent to Telegram.)`
+            );
+          }).catch(async (err) => {
+            console.error('chat select error:', err.message);
+            await sendReply(message.chat.id, message.message_id, `Error: ${err.message}`);
+          });
           continue;
         }
 

@@ -144,10 +144,13 @@ Use `--help` for all flags (connect to existing Chrome, reuse target, etc.).
 ### Behavior
 
 - `/newchat` starts a fresh Gemini chat.
+- `/chats` returns a numbered list of recent Gemini chats.
+- `/chat <number>` switches to a chat from the latest `/chats` list for that Telegram chat.
 - A message is processed when:
   - It contains `@TELEGRAM_TRIGGER_USERNAME`, or
   - It is a reply to another message.
 - The bot responds by replying to that Telegram message (`reply_to_message_id`), so the response is quoted/threaded.
+- Switching chats does not dump existing Gemini history into Telegram.
 
 ### Environment Variables
 

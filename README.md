@@ -17,6 +17,7 @@ A command-line interface for interacting with Google Gemini and Google AI Mode (
   - **Local File Inclusion:** `@include "filename"` inlines file content.
   - **One-Sentence Mode:** `~ <prompt>` requests a concise, one-sentence response.
 - **Resilient Automation:** Handles reloads and recovers from stale sessions.
+- **Telegram Bridge:** Optional bot that triggers on `@username` mentions or replies and sends responses back as quoted replies.
 
 ## Prerequisites
 
@@ -135,6 +136,35 @@ node google-ai-mode.js --query "your question" --mode aimode
 ```
 
 Use `--help` for all flags (connect to existing Chrome, reuse target, etc.).
+
+## Telegram Bot Bridge
+
+`telegram-bot.js` lets Telegram messages drive the same Chromium/Gemini browser session.
+
+### Behavior
+
+- `/newchat` starts a fresh Gemini chat.
+- A message is processed when:
+  - It contains `@TELEGRAM_TRIGGER_USERNAME`, or
+  - It is a reply to another message.
+- The bot responds by replying to that Telegram message (`reply_to_message_id`), so the response is quoted/threaded.
+
+### Environment Variables
+
+- `TELEGRAM_BOT_TOKEN` (required): Bot token from BotFather.
+- `TELEGRAM_TRIGGER_USERNAME` (optional): Mention trigger username without `@`. If omitted, only replies trigger.
+- `BROWSER_PORT` (optional, default `9233`): Chromium remote debugging port.
+- `GEMINI_URL` (optional): Override Gemini URL.
+- `TELEGRAM_POLL_TIMEOUT_SECONDS` (optional, default `30`): Telegram long-poll timeout.
+- `TELEGRAM_ALLOWED_CHAT_IDS` (optional): Comma-separated allowlist of chat IDs.
+
+### Run
+
+1. Start Chromium/Gemini as usual (for example with `./chatbot --reload --virtual`).
+2. Start the Telegram bridge:
+   ```bash
+   TELEGRAM_BOT_TOKEN=... TELEGRAM_TRIGGER_USERNAME=yourtag npm run telegram-bot
+   ```
 
 ## SSH Usage
 

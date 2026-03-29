@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "telegram-bot": "node telegram-bot.js"
   },
   "keywords": [],
   "author": "",

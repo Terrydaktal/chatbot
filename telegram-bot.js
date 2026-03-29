@@ -10,7 +10,9 @@ const TELEGRAM_TRIGGER_USERNAME = (process.env.TELEGRAM_TRIGGER_USERNAME || '')
 const TELEGRAM_ALLOWED_CHAT_IDS = parseAllowedChatIds(process.env.TELEGRAM_ALLOWED_CHAT_IDS || '');
 const BROWSER_PORT = Number(process.env.BROWSER_PORT || 9233);
 const GEMINI_URL = process.env.GEMINI_URL || 'https://gemini.google.com/app?hl=en-gb';
+const AI_MODE_URL = process.env.AI_MODE_URL || 'https://www.google.com/search?udm=50&aep=11';
 const POLL_TIMEOUT_SECONDS = Number(process.env.TELEGRAM_POLL_TIMEOUT_SECONDS || 30);
+const DEFAULT_MODE = normalizeMode(process.env.TELEGRAM_DEFAULT_MODE || 'gemini') || 'gemini';
 
 const INPUT_SELECTORS = [
   '.ITIRGe',
@@ -20,6 +22,11 @@ const INPUT_SELECTORS = [
   '[contenteditable="true"]',
 ];
 const RESPONSE_SELECTOR = '.model-response-text, .markdown, .message-content';
+const AI_MODE_HISTORY_BUTTON_SELECTOR = 'button.UTNPFf[aria-label="AI Mode history"]';
+const AI_MODE_HISTORY_ITEM_SELECTOR = 'button.qqMZif[data-thread-id]';
+const AI_SEND_SELECTORS = ['button[aria-label="Send"]', 'button[data-xid="input-plate-send-button"]', '.OEueve'];
+const AI_INPUT_SELECTORS = ['.ITIRGe', 'textarea[aria-label="Ask anything"]', 'textarea', '[contenteditable="true"]'];
+const AI_RESPONSE_SELECTOR = '[data-xid="aim-mars-turn-root"] [data-xid="VpUvz"], [data-xid="aim-mars-turn-root"]';
 const TELEGRAM_MAX_MESSAGE = 4096;
 
 if (!TELEGRAM_BOT_TOKEN) {
@@ -28,9 +35,9 @@ if (!TELEGRAM_BOT_TOKEN) {
 }
 
 class GeminiBridge {
-  constructor(port, url) {
+  constructor(port, urls) {
     this.port = port;
-    this.url = url;
+    this.urls = urls;
     this.browser = null;
     this.page = null;
   }
@@ -47,27 +54,107 @@ class GeminiBridge {
     });
   }
 
-  async ensurePage(newChat = false) {
+  getModeConfig(mode) {
+    if (mode === 'ai') {
+      return {
+        url: this.urls.ai,
+        inputSelectors: AI_INPUT_SELECTORS,
+        responseSelector: AI_RESPONSE_SELECTOR,
+        historyItemSelector: AI_MODE_HISTORY_ITEM_SELECTOR,
+      };
+    }
+    return {
+      url: this.urls.gemini,
+      inputSelectors: INPUT_SELECTORS,
+      responseSelector: RESPONSE_SELECTOR,
+      historyItemSelector: '[data-test-id="conversation"]',
+    };
+  }
+
+  async ensurePage(mode, newChat = false) {
+    const config = this.getModeConfig(mode);
     await this.ensureConnected();
     if (!this.page || this.page.isClosed()) {
       const pages = await this.browser.pages();
       this.page = pages.find((p) => !p.url().startsWith('chrome-extension://')) || await this.browser.newPage();
     }
 
-    const shouldNavigate = newChat || !this.page.url().includes('gemini.google.com');
+    const currentUrl = this.page.url() || '';
+    const isOnModeSurface = mode === 'ai'
+      ? currentUrl.includes('google.com/search')
+      : currentUrl.includes('gemini.google.com');
+    const shouldNavigate = newChat || !isOnModeSurface;
     if (shouldNavigate) {
-      await this.page.goto(this.url, { waitUntil: 'networkidle2', timeout: 60000 });
+      await this.page.goto(config.url, { waitUntil: 'networkidle2', timeout: 60000 });
     }
-    await this.page.waitForSelector(INPUT_SELECTORS.join(', '), { timeout: 120000 });
+    await this.page.waitForSelector(config.inputSelectors.join(', '), { timeout: 120000 });
     return this.page;
   }
 
-  async startNewChat() {
-    await this.ensurePage(true);
+  async startNewChat(mode) {
+    await this.ensurePage(mode, true);
   }
 
-  async listRecentChats(limit = 20) {
-    const page = await this.ensurePage(false);
+  async listRecentChats(mode, limit = 20) {
+    const page = await this.ensurePage(mode, false);
+
+    if (mode === 'ai') {
+      const historyButton = await page.$(AI_MODE_HISTORY_BUTTON_SELECTOR);
+      if (historyButton) {
+        const initialItems = await page.$$(AI_MODE_HISTORY_ITEM_SELECTOR);
+        if (!initialItems.length) {
+          await historyButton.click();
+          await sleep(1000);
+          try {
+            await page.waitForSelector(AI_MODE_HISTORY_ITEM_SELECTOR, { timeout: 5000 });
+          } catch {}
+        }
+      }
+
+      for (let clicks = 0; clicks < 10; clicks += 1) {
+        const showMore = await page.evaluateHandle(() => {
+          const buttons = Array.from(document.querySelectorAll('button'));
+          return buttons.find((b) =>
+            b.classList.contains('EBNOJf') ||
+            (b.getAttribute('aria-label') || '').includes('See more AI Mode') ||
+            (b.innerText || '').includes('Show more')
+          ) || null;
+        });
+        const button = showMore && showMore.asElement ? showMore.asElement() : null;
+        if (!button) break;
+        const isVisible = await button.evaluate((el) => {
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
+        }).catch(() => false);
+        if (!isVisible) break;
+        await button.evaluate((el) => el.scrollIntoView({ block: 'center' })).catch(() => {});
+        await sleep(400);
+        await button.click().catch(() => {});
+        await sleep(1200);
+      }
+
+      const aiChats = await page.evaluate((selector) => {
+        const results = [];
+        const seen = new Set();
+        const elements = Array.from(document.querySelectorAll(selector));
+        elements.forEach((el, index) => {
+          const title = (el.innerText || el.getAttribute('aria-label') || 'Untitled chat').trim();
+          const threadId = el.getAttribute('data-thread-id');
+          const key = threadId || `idx:${index}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          results.push({ title, href: '', clickIndex: index });
+        });
+        return results;
+      }, AI_MODE_HISTORY_ITEM_SELECTOR);
+
+      return aiChats.slice(0, Math.max(1, limit)).map((c) => ({
+        title: (c.title || '').trim() || 'Untitled chat',
+        href: '',
+        clickIndex: Number.isInteger(c.clickIndex) ? c.clickIndex : -1,
+      }));
+    }
+
     const chats = await page.evaluate(() => {
       const tooltipMap = new Map();
       const tooltipContainer = document.querySelector('.cdk-describedby-message-container');
@@ -131,21 +218,23 @@ class GeminiBridge {
 
   async selectChat(chatRef) {
     if (!chatRef) throw new Error('Missing chat reference.');
-    const page = await this.ensurePage(false);
+    const mode = normalizeMode(chatRef.mode) || 'gemini';
+    const config = this.getModeConfig(mode);
+    const page = await this.ensurePage(mode, false);
 
     if (chatRef.href) {
       const targetUrl = chatRef.href.startsWith('http')
         ? chatRef.href
-        : new URL(chatRef.href, this.url).toString();
+        : new URL(chatRef.href, config.url).toString();
       await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
     } else if (Number.isInteger(chatRef.clickIndex) && chatRef.clickIndex >= 0) {
-      const clicked = await page.evaluate((index) => {
-        const items = document.querySelectorAll('[data-test-id="conversation"]');
+      const clicked = await page.evaluate((index, selector) => {
+        const items = document.querySelectorAll(selector);
         if (!items[index]) return false;
         items[index].scrollIntoView({ block: 'center' });
         items[index].click();
         return true;
-      }, chatRef.clickIndex);
+      }, chatRef.clickIndex, config.historyItemSelector);
       if (!clicked) throw new Error('Could not click selected chat item.');
       try {
         await page.waitForNetworkIdle({ timeout: 10000, idleTime: 500 });
@@ -154,20 +243,21 @@ class GeminiBridge {
       throw new Error('Selected chat has no usable navigation target.');
     }
 
-    await page.waitForSelector(INPUT_SELECTORS.join(', '), { timeout: 120000 });
+    await page.waitForSelector(config.inputSelectors.join(', '), { timeout: 120000 });
   }
 
-  async ask(promptText) {
+  async ask(promptText, mode) {
     const prompt = (promptText || '').trim();
     if (!prompt) throw new Error('Empty prompt.');
+    const config = this.getModeConfig(mode);
 
-    const page = await this.ensurePage(false);
-    const input = await findVisibleInput(page, INPUT_SELECTORS);
+    const page = await this.ensurePage(mode, false);
+    const input = await findVisibleInput(page, config.inputSelectors);
     if (!input) throw new Error('Could not find a visible Gemini input field.');
 
     const initialCount = await page.evaluate((selector) => {
       return document.querySelectorAll(selector).length;
-    }, RESPONSE_SELECTOR).catch(() => 0);
+    }, config.responseSelector).catch(() => 0);
 
     await page.evaluate((el) => {
       el.focus();
@@ -183,10 +273,24 @@ class GeminiBridge {
 
     await input.focus();
     await page.keyboard.type(prompt);
-    await page.keyboard.press('Enter');
+    if (mode === 'ai') {
+      const clicked = await page.evaluate((selectors) => {
+        for (const selector of selectors) {
+          const btn = document.querySelector(selector);
+          if (btn && !btn.disabled) {
+            btn.click();
+            return true;
+          }
+        }
+        return false;
+      }, AI_SEND_SELECTORS).catch(() => false);
+      if (!clicked) await page.keyboard.press('Enter');
+    } else {
+      await page.keyboard.press('Enter');
+    }
     await input.dispose();
 
-    return waitForGeminiResponse(page, initialCount, prompt);
+    return waitForGeminiResponse(page, initialCount, prompt, config.responseSelector);
   }
 }
 
@@ -211,7 +315,7 @@ async function findVisibleInput(page, selectors) {
   return null;
 }
 
-async function waitForGeminiResponse(page, initialCount, prompt) {
+async function waitForGeminiResponse(page, initialCount, prompt, responseSelector) {
   const timeoutAt = Date.now() + 180000;
   const promptNorm = normalizeText(prompt);
   let previous = '';
@@ -223,7 +327,7 @@ async function waitForGeminiResponse(page, initialCount, prompt) {
         .map((el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
         .filter(Boolean);
       return { count: texts.length, lastText: texts[texts.length - 1] || '' };
-    }, RESPONSE_SELECTOR);
+    }, responseSelector);
 
     const candidate = (lastText || '').trim();
     const candidateNorm = normalizeText(candidate);
@@ -318,6 +422,28 @@ function parseChatSelectCommand(text, botUsername) {
   return { index };
 }
 
+function parseModeCommand(text, botUsername) {
+  const raw = (text || '').trim();
+  if (!raw) return null;
+  const parts = raw.split(/\s+/).filter(Boolean);
+  if (!parts.length) return null;
+  const cmd = parts[0].toLowerCase();
+  const plain = '/mode';
+  const withBot = botUsername ? `/mode@${botUsername.toLowerCase()}` : '';
+  if (cmd !== plain && (!withBot || cmd !== withBot)) return null;
+  if (parts.length < 2) return { query: true };
+  const mode = normalizeMode(parts[1]);
+  if (!mode) return { error: 'Usage: /mode <gemini|ai>' };
+  return { mode };
+}
+
+function normalizeMode(value) {
+  const v = (value || '').toString().trim().toLowerCase();
+  if (v === 'ai' || v === 'aimode' || v === 'ai-mode') return 'ai';
+  if (v === 'gemini') return 'gemini';
+  return '';
+}
+
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -358,7 +484,7 @@ async function sendReply(chatId, replyToMessageId, text) {
 function formatChatsReply(chats) {
   if (!chats.length) return 'No recent chats found.';
   const lines = chats.map((chat, idx) => `${idx + 1}. ${chat.title}`);
-  return `Recent chats:\n${lines.join('\n')}`;
+  return `Recent chats:\n${lines.join('\n')}\n\nUse /chat <number> to switch.`;
 }
 
 function chunkText(text, maxLen) {
@@ -377,18 +503,35 @@ function chunkText(text, maxLen) {
   return chunks;
 }
 
+async function registerTelegramCommands() {
+  const commands = [
+    { command: 'newchat', description: 'Start a fresh chat in current mode' },
+    { command: 'chats', description: 'List recent chats in current mode' },
+    { command: 'chat', description: 'Switch chat: /chat <number>' },
+    { command: 'mode', description: 'Show or set mode: /mode gemini|ai' },
+  ];
+  await telegramCall('setMyCommands', { commands });
+}
+
 async function main() {
   const me = await telegramCall('getMe', {});
   const botUsername = me && me.username ? me.username : '';
-  const bridge = new GeminiBridge(BROWSER_PORT, GEMINI_URL);
+  const bridge = new GeminiBridge(BROWSER_PORT, { gemini: GEMINI_URL, ai: AI_MODE_URL });
+  try {
+    await registerTelegramCommands();
+  } catch (err) {
+    console.error(`setMyCommands failed: ${err.message}`);
+  }
 
   console.log(`Telegram bot ready as @${botUsername || 'unknown'}.`);
   console.log(`Trigger username: ${TELEGRAM_TRIGGER_USERNAME ? '@' + TELEGRAM_TRIGGER_USERNAME : '(reply-only mode)'}`);
   console.log(`Browser endpoint: http://127.0.0.1:${BROWSER_PORT}`);
+  console.log(`Default mode: ${DEFAULT_MODE}`);
 
   let offset = 0;
   let queue = Promise.resolve();
   const recentChatsByTelegramChatId = new Map();
+  const modeByTelegramChatId = new Map();
 
   while (true) {
     try {
@@ -404,19 +547,36 @@ async function main() {
         if (!message) continue;
 
         const text = (message.text || message.caption || '').trim();
+        const telegramChatId = String(message.chat.id);
+        const currentMode = modeByTelegramChatId.get(telegramChatId) || DEFAULT_MODE;
+
+        const modeCommand = parseModeCommand(text, botUsername);
+        if (modeCommand) {
+          if (modeCommand.error) {
+            await sendReply(message.chat.id, message.message_id, modeCommand.error);
+            continue;
+          }
+          if (modeCommand.query) {
+            await sendReply(message.chat.id, message.message_id, `Current mode: ${currentMode}`);
+            continue;
+          }
+          modeByTelegramChatId.set(telegramChatId, modeCommand.mode);
+          await sendReply(message.chat.id, message.message_id, `Mode set to ${modeCommand.mode}.`);
+          continue;
+        }
 
         if (isNewChatCommand(text, botUsername)) {
           queue = queue.then(async () => {
-            await bridge.startNewChat();
-            await sendReply(message.chat.id, message.message_id, 'Started a new Gemini chat.');
+            await bridge.startNewChat(currentMode);
+            await sendReply(message.chat.id, message.message_id, `Started a new ${currentMode} chat.`);
           }).catch((err) => console.error('newchat error:', err.message));
           continue;
         }
 
         if (isChatsCommand(text, botUsername)) {
           queue = queue.then(async () => {
-            const chats = await bridge.listRecentChats(20);
-            recentChatsByTelegramChatId.set(String(message.chat.id), chats);
+            const chats = await bridge.listRecentChats(currentMode, 20);
+            recentChatsByTelegramChatId.set(telegramChatId, chats.map((c) => ({ ...c, mode: currentMode })));
             await sendReply(message.chat.id, message.message_id, formatChatsReply(chats));
           }).catch(async (err) => {
             console.error('chats error:', err.message);
@@ -432,7 +592,7 @@ async function main() {
             continue;
           }
           queue = queue.then(async () => {
-            const chats = recentChatsByTelegramChatId.get(String(message.chat.id)) || [];
+            const chats = recentChatsByTelegramChatId.get(telegramChatId) || [];
             if (!chats.length) {
               await sendReply(message.chat.id, message.message_id, 'No chat list is cached yet. Run /chats first.');
               return;
@@ -469,7 +629,7 @@ async function main() {
 
         queue = queue.then(async () => {
           await telegramCall('sendChatAction', { chat_id: message.chat.id, action: 'typing' });
-          const answer = await bridge.ask(prompt);
+          const answer = await bridge.ask(prompt, currentMode);
           await sendReply(message.chat.id, message.message_id, answer);
         }).catch(async (err) => {
           console.error('message error:', err.message);

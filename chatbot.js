@@ -23,6 +23,7 @@ const highlight = require('highlight.js');
 const { execSync } = require('child_process');
 const wrapAnsi = require('wrap-ansi');
 const { buildQuestionAnswerPairs, questionLabel } = require('./lib/questions');
+const { BrowserAiInterface } = require('./lib/browser-ai-interface');
 
 // Configure Markdown Renderer with Highlighting
 const OUTPUT_WIDTH = 88;
@@ -34,8 +35,7 @@ const CHAR_STREAM_DELAY_MS = 1;
 const ANSI_REGEX = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
 const AI_RESPONSE_POLL_INTERVAL_MS = 150;
 const AI_RESPONSE_STABLE_TICKS = 2;
-const AI_SUBMIT_CONFIRM_TIMEOUT_MS = 400;
-const AI_SUBMIT_CONFIRM_INTERVAL_MS = 80;
+const sharedAiInterface = new BrowserAiInterface();
 
 function getRenderer(opts = {}) {
     const cols = process.stdout.columns || OUTPUT_WIDTH;
@@ -1495,7 +1495,6 @@ const RESPONSE_CONTAINER_SELECTOR = 'response-container, .response-container';
 
 const AI_RESPONSE_SELECTOR = '[data-xid="aim-mars-turn-root"] [data-xid="VpUvz"], [data-xid="aim-mars-turn-root"]';
 const AI_RESPONSE_CONTAINER_SELECTOR = '[data-xid="aim-mars-turn-root"]';
-const AI_SEND_SELECTORS = ['button[aria-label="Send"]', 'button[data-xid="input-plate-send-button"]', '.OEueve'];
 const AI_MODE_HISTORY_BUTTON_SELECTOR = 'button.UTNPFf[aria-label="AI Mode history"]';
 const AI_MODE_HISTORY_ITEM_SELECTOR = 'button.qqMZif[data-thread-id]';
 const AI_MODE_SHOW_MORE_SELECTOR = 'button.EBNOJf';
@@ -1863,82 +1862,30 @@ async function main() {
 }
 
 async function ensureModel(page, modelKeywords) {
-    try {
-        console.log(chalk.yellow(`Checking model selector for: ${modelKeywords.join(' or ')}...`));
-        
-        const modelBadgeSelectors = [
-            '[data-test-id="bard-mode-menu-button"]',
-            'button.input-area-switch',
-            'button[aria-haspopup="menu"]',
-            '.model-selector', 
-            'button[data-test-id="model-selector"]'
-        ];
+  try {
+    console.log(chalk.yellow(`Checking model selector for: ${modelKeywords.join(' or ')}...`));
+    const lowered = (Array.isArray(modelKeywords) ? modelKeywords : [])
+      .map((kw) => String(kw).toLowerCase());
+    const target = lowered.some((kw) => kw === 'flash' || kw === 'fast')
+      ? 'geminifast'
+      : lowered.some((kw) => kw === 'advanced' || kw === 'pro' || kw === 'ultra')
+        ? 'geminipro'
+        : '';
 
-        let modelBadge;
-        for (const sel of modelBadgeSelectors) {
-             modelBadge = await page.$(sel);
-             if (modelBadge) break;
-        }
-
-        if (modelBadge) {
-            const text = await page.evaluate(el => el.innerText, modelBadge);
-            console.log(chalk.dim(`Current model badge text: "${text}"`));
-            
-            if (modelKeywords.some(kw => text.includes(kw))) {
-                console.log(chalk.green(`Target model (${modelKeywords[0]}) is already active.`));
-                return;
-            }
-            
-            console.log(chalk.yellow('Opening model menu...'));
-            await modelBadge.click();
-            
-            try {
-                let targetOption;
-                
-                // Strategy 1: Look for data-test-id based on keywords
-                // Keywords: ['Flash', 'Fast'] -> data-test-id="bard-mode-option-fast"
-                // Keywords: ['Advanced', 'Pro', 'Ultra'] -> data-test-id="bard-mode-option-pro"
-                
-                const isFast = modelKeywords.some(k => ['Flash', 'Fast'].includes(k));
-                const isPro = modelKeywords.some(k => ['Advanced', 'Pro', 'Ultra'].includes(k));
-                
-                if (isFast) {
-                    try {
-                        targetOption = await page.waitForSelector('button[data-test-id="bard-mode-option-fast"]', { timeout: 1000 });
-                    } catch(e) {}
-                } else if (isPro) {
-                     try {
-                        targetOption = await page.waitForSelector('button[data-test-id="bard-mode-option-pro"]', { timeout: 1000 });
-                    } catch(e) {}
-                }
-
-                // Strategy 2: Fallback to text matching if explicit IDs fail
-                if (!targetOption) {
-                    for (const kw of modelKeywords) {
-                        try {
-                            targetOption = await page.waitForSelector(`xpath/.//button//span[contains(text(), "${kw}")]`, { timeout: 500 });
-                            if (targetOption) break;
-                        } catch(e) {}
-                    }
-                }
-                
-                if (targetOption) {
-                    console.log(chalk.yellow(`Selecting model...`));
-                    await targetOption.click();
-                    await new Promise(r => setTimeout(r, 2000));
-                    return;
-                } else {
-                     console.log(chalk.red(`Model option '${modelKeywords.join('/')}' not found in menu.`));
-                }
-            } catch (e) {
-                console.log(chalk.yellow('Could not find model option in menu (timeout).'));
-            }
-        } else {
-             console.log(chalk.red('Could not find model selector dropdown.'));
-        }
-    } catch (error) {
-        console.error(chalk.red('Failed to switch model automatically:'), error.message);
+    if (!target) {
+      console.log(chalk.red(`Unknown target model keywords: ${modelKeywords.join('/')}`));
+      return;
     }
+
+    const changed = await sharedAiInterface.ensureGeminiModel(page, target);
+    if (changed) {
+      console.log(chalk.green('Model switched successfully.'));
+    } else {
+      console.log(chalk.green(`Target model (${modelKeywords[0]}) is already active.`));
+    }
+  } catch (error) {
+    console.error(chalk.red('Failed to switch model automatically:'), error.message);
+  }
 }
 
 async function startChatInterface(page, browser) {
@@ -3164,281 +3111,12 @@ async function waitForAIResponseAndRender(page, initialCount, isOneSentenceMode 
   }
 }
 
-async function sendPromptToAiMode(page, inputElement, promptText, initialCount) {
-  const client = await getCdpSession(page);
-  try {
-    await page.evaluate((el) => {
-      if (!el) return;
-      try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
-      try { el.click(); } catch (e) {}
-      try { el.focus(); } catch (e) {}
-      const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
-      if (isContentEditable) {
-        el.textContent = '';
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        range.collapse(false);
-        const selection = window.getSelection();
-        if (selection) {
-          selection.removeAllRanges();
-          selection.addRange(range);
-        }
-      } else {
-        el.value = '';
-        if (typeof el.setSelectionRange === 'function') {
-          el.setSelectionRange(0, 0);
-        } else {
-          el.selectionStart = 0;
-          el.selectionEnd = 0;
-        }
-      }
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, inputElement);
-  } catch (e) {}
-
-  let inserted = false;
-  if (client) {
-    try {
-      await client.send('Input.insertText', { text: promptText });
-      inserted = true;
-    } catch (e) {}
-  }
-
-  if (!inserted) {
-    try {
-      await page.evaluate((el, text) => {
-        if (!el) return;
-        const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
-        if (isContentEditable) {
-          el.textContent = text;
-        } else {
-          el.value = text;
-        }
-      }, inputElement, promptText);
-    } catch (e) {}
-  }
-
-  try {
-    await page.evaluate((el, text) => {
-      if (!el) return;
-      const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
-      const current = (isContentEditable ? (el.textContent || '') : (el.value || ''));
-      if (current.trim() !== text.trim()) {
-        if (isContentEditable) {
-          el.textContent = text;
-        } else {
-          el.value = text;
-        }
-      }
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: ' ', code: 'Space' }));
-      el.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: ' ', code: 'Space' }));
-    }, inputElement, promptText);
-  } catch (e) {}
-
-  await new Promise(r => setTimeout(r, 25));
-
-  const baselineCount = Number.isFinite(initialCount) ? initialCount : null;
-  const confirmSubmitted = async () => {
-    return page.evaluate((el, baseline, responseSelector, responseContainerSelector, query) => {
-      const isContentEditable =
-        el && (el.isContentEditable || el.getAttribute('contenteditable') === 'true');
-      const current = el ? (isContentEditable ? (el.textContent || '') : (el.value || '')) : '';
-      const cleared = current.trim().length === 0;
-      const allCandidates = Array.from(document.querySelectorAll(responseSelector));
-      const scopedCandidates = allCandidates.filter(node => node.closest(responseContainerSelector));
-      const count = (scopedCandidates.length ? scopedCandidates : allCandidates).length;
-      if (typeof baseline === 'number' && count > baseline) return true;
-      if (cleared && query && query.trim().length > 0) return true;
-      return false;
-    }, inputElement, baselineCount, AI_RESPONSE_SELECTOR, AI_RESPONSE_CONTAINER_SELECTOR, promptText);
-  };
-
-  const tryClickSendButton = async () => {
-    let clicked = false;
-    let center = null;
-    try {
-      const info = await page.evaluate((selectors) => {
-        const list = Array.isArray(selectors) ? selectors : [selectors];
-        const isVisible = (el) => {
-          if (!el) return false;
-          const style = window.getComputedStyle(el);
-          if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
-          const rect = el.getBoundingClientRect();
-          return rect && rect.width > 0 && rect.height > 0;
-        };
-        let button = null;
-        for (const sel of list) {
-          const el = document.querySelector(sel);
-          if (el && isVisible(el)) {
-            button = el;
-            break;
-          }
-        }
-        if (!button) return { clicked: false, center: null };
-        const disabledClasses = ['wdK4Nc', 'IbS5tc', 'Z3UdVc'];
-        disabledClasses.forEach((cls) => {
-          if (button.classList.contains(cls)) button.classList.remove(cls);
-        });
-        if (button.hasAttribute('disabled')) {
-          button.removeAttribute('disabled');
-        }
-        if (button.getAttribute('aria-disabled') === 'true') {
-          button.setAttribute('aria-disabled', 'false');
-        }
-        if (button.getAttribute('tabindex') === '-1') {
-          button.removeAttribute('tabindex');
-        }
-        const rect = button.getBoundingClientRect();
-        const center = rect ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
-        button.click();
-        return { clicked: true, center };
-      }, AI_SEND_SELECTORS);
-      clicked = Boolean(info && info.clicked);
-      center = info ? info.center : null;
-    } catch (e) {}
-    if (!clicked && center && client) {
-      try {
-        await client.send('Input.dispatchMouseEvent', {
-          type: 'mousePressed',
-          x: center.x,
-          y: center.y,
-          button: 'left',
-          clickCount: 1,
-        });
-        await client.send('Input.dispatchMouseEvent', {
-          type: 'mouseReleased',
-          x: center.x,
-          y: center.y,
-          button: 'left',
-          clickCount: 1,
-        });
-        clicked = true;
-      } catch (e) {}
-    }
-    return clicked;
-  };
-
-  const dispatchEnter = async () => {
-    let dispatched = false;
-    if (client) {
-      try {
-        await client.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-        await client.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 });
-        dispatched = true;
-      } catch (e) {}
-    }
-    if (!dispatched) {
-      try { await page.keyboard.press('Enter'); } catch (e) {}
-    }
-    try {
-      await page.evaluate((el) => {
-        if (!el) return;
-        const eventInit = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true };
-        el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
-        el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
-      }, inputElement);
-    } catch (e) {}
-  };
-
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    const clickedSend = await tryClickSendButton();
-    if (!clickedSend) {
-      await dispatchEnter();
-    }
-    const confirmStart = Date.now();
-    while (Date.now() - confirmStart < AI_SUBMIT_CONFIRM_TIMEOUT_MS) {
-      if (await confirmSubmitted()) return;
-      await new Promise(r => setTimeout(r, AI_SUBMIT_CONFIRM_INTERVAL_MS));
-    }
-    try {
-      await page.evaluate((el, text) => {
-        if (!el) return;
-        el.focus();
-        const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
-        if (isContentEditable) {
-          el.textContent = text;
-        } else {
-          el.value = text;
-        }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }, inputElement, promptText);
-    } catch (e) {}
-  }
-}
-
-async function findVisibleInput(page, selectors, preferAiMode, timeoutMs = 1500) {
-  const selector = selectors.join(', ');
-  try {
-    await page.waitForSelector(selector, { timeout: timeoutMs });
-  } catch (e) {}
-  const handle = await page.evaluateHandle((selectorList, preferAi) => {
-    const isVisible = (el) => {
-      if (!el) return false;
-      const style = window.getComputedStyle(el);
-      if (!style || style.display === 'none' || style.visibility === 'hidden') return false;
-      return el.offsetHeight > 0 && el.offsetWidth > 0;
-    };
-    const candidates = [];
-    selectorList.forEach((sel, selIndex) => {
-      document.querySelectorAll(sel).forEach((el, index) => {
-        if (!isVisible(el)) return;
-        const rect = el.getBoundingClientRect();
-        candidates.push({
-          el,
-          selIndex,
-          index,
-          bottom: rect.bottom,
-          inInputPlate: Boolean(el.closest('div[data-xid="aim-mars-input-plate"]')),
-        });
-      });
-    });
-    if (!candidates.length) return null;
-    let pool = candidates;
-    if (preferAi) {
-      const inPlate = candidates.filter((c) => c.inInputPlate);
-      if (inPlate.length) pool = inPlate;
-    }
-    pool.sort((a, b) => b.bottom - a.bottom);
-    return pool[0].el;
-  }, selectors, preferAiMode);
-  const element = handle.asElement();
-  if (!element) {
-    await handle.dispose();
-    return null;
-  }
-  return element;
-}
-
 async function sendPromptToGemini(page, promptText, isOneSentenceMode = false) {
-  // Enhanced selector list for the main chat input
-  const inputSelectors = [
-      '.ITIRGe',
-      'textarea[aria-label="Ask anything"]',
-      '.ql-editor.textarea',
-      'div[role="textbox"][contenteditable="true"]',
-      'div[contenteditable="true"]', 
-      'textarea[placeholder*="Ask"]',
-      'textarea'
-  ];
-  
-  const inputElement = await findVisibleInput(page, inputSelectors, options.aiMode, 1500);
-
-  if (!inputElement) {
-       console.error(chalk.red('Could not find chat input box. The page layout might have changed.'));
-       return;
-  }
-  
   // Wake up the tab before interaction to prevent background throttling
   await applyLifecycleOverrides(page);
   await applyVisibilityOverride(page);
   
   try {
-    await inputElement.focus();
-
     // Check for stuck "Stop" button and click it if present
     try {
         // Expanded selectors for the Stop button
@@ -3463,63 +3141,25 @@ async function sendPromptToGemini(page, promptText, isOneSentenceMode = false) {
             await new Promise(r => setTimeout(r, 500)); // Wait for UI to update
         }
     } catch (e) {}
-
-    // Count existing message bubbles before sending
-    let initialCount = 0;
-    const selectorToCount = options.aiMode ? AI_RESPONSE_SELECTOR : RESPONSE_SELECTOR;
-    const containerToCount = options.aiMode ? AI_RESPONSE_CONTAINER_SELECTOR : RESPONSE_CONTAINER_SELECTOR;
-
-    initialCount = await page.evaluate((responseSelector, responseContainerSelector) => {
-        const allCandidates = Array.from(document.querySelectorAll(responseSelector));
-        const scopedCandidates = allCandidates.filter(el => el.closest(responseContainerSelector));
-        return (scopedCandidates.length ? scopedCandidates : allCandidates).length;
-    }, selectorToCount, containerToCount);
-
-    // Send prompt
-    if (options.aiMode) {
-        await sendPromptToAiMode(page, inputElement, promptText, initialCount);
-    } else {
-        if (promptText.length > 200) {
-            // Use clipboard paste for large text
-            await page.evaluate((text) => {
-                const data = new DataTransfer();
-                data.setData('text/plain', text);
-                const event = new ClipboardEvent('paste', {
-                    clipboardData: data,
-                    bubbles: true,
-                    cancelable: true
-                });
-                document.activeElement.dispatchEvent(event);
-
-                // Fallback if paste event doesn't trigger native insertion (often blocked)
-                // But for Gemini's rich text editor, we might need execCommand
-                if (document.activeElement.innerText.trim() === '') {
-                     document.execCommand('insertText', false, text);
-                }
-            }, promptText);
+    const currentModel = options.aiMode
+      ? 'aimode'
+      : options.geminiPro
+        ? 'geminipro'
+        : options.geminiFast
+          ? 'geminifast'
+          : 'gemini';
+    await sharedAiInterface.ask(page, {
+      prompt: promptText,
+      model: currentModel,
+      preferAiMode: options.aiMode,
+      waitForResponse: async ({ initialCount }) => {
+        if (options.aiMode) {
+          await waitForAIResponseAndRender(page, initialCount, isOneSentenceMode);
         } else {
-            await page.keyboard.type(promptText);
-
-            // Verify text was entered (check value for textarea, innerText for div)
-            const currentText = await page.evaluate(el => el.value || el.innerText, inputElement);
-            if (!currentText || currentText.trim() === '') {
-                // console.log(chalk.dim('Typing failed, forcing text insertion...'));
-                await page.evaluate((el, text) => {
-                    el.focus();
-                    document.execCommand('insertText', false, text);
-                }, inputElement, promptText);
-            }
+          await waitForResponseAndRender(page, initialCount, isOneSentenceMode);
         }
-
-        await new Promise(r => setTimeout(r, 300)); // Small delay for UI update
-        await page.keyboard.press('Enter');
-    }
-
-    if (options.aiMode) {
-        await waitForAIResponseAndRender(page, initialCount, isOneSentenceMode);
-    } else {
-        await waitForResponseAndRender(page, initialCount, isOneSentenceMode);
-    }
+      },
+    });
 
   } catch (error) {
     console.error(chalk.red('Error interacting with page:'), error.message);

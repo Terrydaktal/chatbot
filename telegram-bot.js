@@ -2,6 +2,7 @@
 'use strict';
 
 const puppeteer = require('puppeteer-core');
+const { BrowserAiInterface } = require('./lib/browser-ai-interface');
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_TRIGGER_USERNAME = (process.env.TELEGRAM_TRIGGER_USERNAME || '')
@@ -13,24 +14,15 @@ const BROWSER_PORT = Number(process.env.BROWSER_PORT || 9233);
 const GEMINI_URL = process.env.GEMINI_URL || 'https://gemini.google.com/app?hl=en-gb';
 const AI_MODE_URL = process.env.AI_MODE_URL || 'https://www.google.com/search?udm=50&aep=11';
 const POLL_TIMEOUT_SECONDS = Number(process.env.TELEGRAM_POLL_TIMEOUT_SECONDS || 30);
-const DEFAULT_MODEL = normalizeModel(
-  process.env.TELEGRAM_DEFAULT_MODEL || process.env.TELEGRAM_DEFAULT_MODE || 'geminifast'
-) || 'geminifast';
 
-const INPUT_SELECTORS = [
-  '.ITIRGe',
-  'textarea[aria-label="Ask anything"]',
-  '.ql-editor',
-  'textarea',
-  '[contenteditable="true"]',
-];
-const RESPONSE_SELECTOR = '.model-response-text, .markdown, .message-content';
 const AI_MODE_HISTORY_BUTTON_SELECTOR = 'button.UTNPFf[aria-label="AI Mode history"]';
 const AI_MODE_HISTORY_ITEM_SELECTOR = 'button.qqMZif[data-thread-id]';
-const AI_SEND_SELECTORS = ['button[aria-label="Send"]', 'button[data-xid="input-plate-send-button"]', '.OEueve'];
-const AI_INPUT_SELECTORS = ['.ITIRGe', 'textarea[aria-label="Ask anything"]', 'textarea', '[contenteditable="true"]'];
-const AI_RESPONSE_SELECTOR = '[data-xid="aim-mars-turn-root"] [data-xid="VpUvz"], [data-xid="aim-mars-turn-root"]';
 const TELEGRAM_MAX_MESSAGE = 4096;
+const CONCISE_PREFIX = 'answer in one sentence: ';
+const CHAT_CONTEXT_DIRECTIVE_MAX = 50;
+const CHAT_HISTORY_LIMIT = 300;
+const HISTORY_MESSAGE_MAX_CHARS = 500;
+const AI_MODE_CHAT_PREVIEW_MAX = 120;
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error('Missing TELEGRAM_BOT_TOKEN environment variable.');
@@ -43,6 +35,7 @@ class GeminiBridge {
     this.urls = urls;
     this.browser = null;
     this.page = null;
+    this.ai = new BrowserAiInterface();
   }
 
   async ensureConnected() {
@@ -58,18 +51,19 @@ class GeminiBridge {
   }
 
   getModelConfig(model) {
+    const shared = this.ai.getModelConfig(model);
     if (model === 'aimode') {
       return {
         url: this.urls.ai,
-        inputSelectors: AI_INPUT_SELECTORS,
-        responseSelector: AI_RESPONSE_SELECTOR,
+        inputSelectors: shared.inputSelectors,
+        responseSelector: shared.responseSelector,
         historyItemSelector: AI_MODE_HISTORY_ITEM_SELECTOR,
       };
     }
     return {
       url: this.urls.gemini,
-      inputSelectors: INPUT_SELECTORS,
-      responseSelector: RESPONSE_SELECTOR,
+      inputSelectors: shared.inputSelectors,
+      responseSelector: shared.responseSelector,
       historyItemSelector: '[data-test-id="conversation"]',
     };
   }
@@ -258,149 +252,17 @@ class GeminiBridge {
   async ask(promptText, model) {
     const prompt = (promptText || '').trim();
     if (!prompt) throw new Error('Empty prompt.');
-    const config = this.getModelConfig(model);
-
     const page = await this.ensurePage(model, false);
-    if (model === 'geminifast') {
-      await this.ensureGeminiFastSelected(page);
-    }
-    const input = await findVisibleInput(page, config.inputSelectors);
-    if (!input) throw new Error('Could not find a visible Gemini input field.');
-
-    const initialCount = await page.evaluate((selector) => {
-      return document.querySelectorAll(selector).length;
-    }, config.responseSelector).catch(() => 0);
-
-    await page.evaluate((el) => {
-      el.focus();
-      if ('value' in el) {
-        el.value = '';
-      }
-      if (el.isContentEditable) {
-        // Avoid innerHTML writes: Gemini may enforce Trusted Types.
-        el.textContent = '';
-      }
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    }, input);
-
-    await input.focus();
-    await page.keyboard.type(prompt);
-    if (model === 'aimode') {
-      const clicked = await page.evaluate((selectors) => {
-        for (const selector of selectors) {
-          const btn = document.querySelector(selector);
-          if (btn && !btn.disabled) {
-            btn.click();
-            return true;
-          }
-        }
-        return false;
-      }, AI_SEND_SELECTORS).catch(() => false);
-      if (!clicked) await page.keyboard.press('Enter');
-    } else {
-      await page.keyboard.press('Enter');
-    }
-    await input.dispose();
-
-    return waitForGeminiResponse(page, initialCount, prompt, config.responseSelector);
+    return this.ai.ask(page, {
+      prompt,
+      model,
+      preferAiMode: model === 'aimode',
+    });
   }
 
   async ensureGeminiFastSelected(page) {
-    const modelBadgeSelectors = [
-      '[data-test-id="bard-mode-menu-button"]',
-      'button.input-area-switch',
-      'button[aria-haspopup="menu"]',
-      '.model-selector',
-      'button[data-test-id="model-selector"]',
-    ];
-
-    let modelBadge = null;
-    for (const selector of modelBadgeSelectors) {
-      modelBadge = await page.$(selector);
-      if (modelBadge) break;
-    }
-    if (!modelBadge) return;
-
-    const badgeText = await page.evaluate((el) => (el.innerText || '').trim(), modelBadge).catch(() => '');
-    if (/flash|fast/i.test(badgeText)) return;
-
-    await modelBadge.click().catch(() => {});
-    await sleep(300);
-
-    let targetOption = await page.$('button[data-test-id="bard-mode-option-fast"]');
-    if (!targetOption) {
-      targetOption = await page.evaluateHandle(() => {
-        const buttons = Array.from(document.querySelectorAll('button'));
-        return buttons.find((b) => /flash|fast/i.test((b.innerText || '').trim())) || null;
-      }).then((h) => (h && h.asElement ? h.asElement() : null)).catch(() => null);
-    }
-    if (!targetOption) return;
-
-    await targetOption.click().catch(() => {});
-    await sleep(800);
+    await this.ai.ensureGeminiFastSelected(page);
   }
-}
-
-async function findVisibleInput(page, selectors) {
-  for (const selector of selectors) {
-    const handle = await page.$(selector);
-    if (!handle) continue;
-    const visible = await page.evaluate((el) => {
-      const style = window.getComputedStyle(el);
-      const rect = el.getBoundingClientRect();
-      return (
-        style &&
-        style.visibility !== 'hidden' &&
-        style.display !== 'none' &&
-        rect.width > 0 &&
-        rect.height > 0
-      );
-    }, handle).catch(() => false);
-    if (visible) return handle;
-    await handle.dispose();
-  }
-  return null;
-}
-
-async function waitForGeminiResponse(page, initialCount, prompt, responseSelector) {
-  const timeoutAt = Date.now() + 180000;
-  const promptNorm = normalizeText(prompt);
-  let previous = '';
-  let stableTicks = 0;
-
-  while (Date.now() < timeoutAt) {
-    const { count, lastText } = await page.evaluate((selector) => {
-      const texts = Array.from(document.querySelectorAll(selector))
-        .map((el) => (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
-        .filter(Boolean);
-      return { count: texts.length, lastText: texts[texts.length - 1] || '' };
-    }, responseSelector);
-
-    const candidate = (lastText || '').trim();
-    const candidateNorm = normalizeText(candidate);
-    const candidateLooksLikePrompt = candidateNorm === promptNorm;
-
-    if (count > initialCount && candidate && !candidateLooksLikePrompt) {
-      if (candidate === previous) {
-        stableTicks += 1;
-      } else {
-        previous = candidate;
-        stableTicks = 0;
-      }
-      if (stableTicks >= 2) {
-        return candidate;
-      }
-    }
-
-    await sleep(900);
-  }
-
-  throw new Error('Timed out waiting for Gemini response.');
-}
-
-function normalizeText(text) {
-  return (text || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 function parseAllowedChatIds(raw) {
@@ -435,17 +297,15 @@ function shouldHandleMessage(message) {
   if (TELEGRAM_ALLOWED_CHAT_IDS && !TELEGRAM_ALLOWED_CHAT_IDS.has(String(message.chat.id))) return false;
   if (!isSenderAllowed(message)) return false;
 
-  if (message.reply_to_message) return true;
-
   const { text, entities } = getMessageTextData(message);
-  const body = (text || '').trim();
-  if (!body) return false;
+  const raw = text || '';
+  if (!raw) return false;
   if (!TELEGRAM_TRIGGER_USERNAME) return false;
 
-  if (entities.some((entity) => isTriggerMentionEntity(entity, text))) return true;
+  if (entities.some((entity) => isTriggerMentionEntity(entity, raw))) return true;
 
   const mentionRegex = new RegExp(`(^|\\s)@${escapeRegex(TELEGRAM_TRIGGER_USERNAME)}\\b`, 'i');
-  return mentionRegex.test(body);
+  return mentionRegex.test(raw);
 }
 
 function extractPrompt(message) {
@@ -463,6 +323,84 @@ function extractPrompt(message) {
   return body;
 }
 
+function parseChatContextDirective(prompt) {
+  const input = (prompt || '').trim();
+  if (!input) return { count: 0, includeBots: false, prompt: '' };
+
+  const direct = input.match(/^\[\[last:(\d{1,3})(:all)?\]\]\s*/i);
+  if (direct) {
+    const count = Math.max(1, Math.min(CHAT_CONTEXT_DIRECTIVE_MAX, Number(direct[1])));
+    return { count, includeBots: Boolean(direct[2]), prompt: input.slice(direct[0].length).trim() };
+  }
+
+  const conciseFirst = input.match(/^~\s*\[\[last:(\d{1,3})(:all)?\]\]\s*/i);
+  if (conciseFirst) {
+    const count = Math.max(1, Math.min(CHAT_CONTEXT_DIRECTIVE_MAX, Number(conciseFirst[1])));
+    const rest = input.slice(conciseFirst[0].length).trim();
+    return { count, includeBots: Boolean(conciseFirst[2]), prompt: rest ? `~ ${rest}` : '~' };
+  }
+
+  return { count: 0, includeBots: false, prompt: input };
+}
+
+function applyTelegramPromptMode(prompt) {
+  const text = (prompt || '').trim();
+  if (!text) return '';
+  if (text.startsWith('~') && !text.startsWith('~~')) {
+    // Keep behavior aligned with chatbot.js concise mode transformation.
+    return CONCISE_PREFIX + text.substring(1);
+  }
+  return text;
+}
+
+function addMessageToChatHistory(historyMap, message) {
+  if (!message) return;
+  const { text } = getMessageTextData(message);
+  const content = (text || '').replace(/\s+/g, ' ').trim();
+  if (!content) return;
+
+  const chatId = String(message.chat && message.chat.id ? message.chat.id : '');
+  if (!chatId) return;
+
+  const userId = String(message.from && message.from.id ? message.from.id : '');
+  const username = message.from && message.from.username ? `@${message.from.username}` : '';
+  const firstName = message.from && message.from.first_name ? message.from.first_name : '';
+  const lastName = message.from && message.from.last_name ? message.from.last_name : '';
+  const displayName = [firstName, lastName].filter(Boolean).join(' ').trim();
+
+  const entry = {
+    messageId: Number(message.message_id) || 0,
+    userId,
+    username,
+    displayName,
+    isBot: Boolean(message.from && message.from.is_bot),
+    text: content.slice(0, HISTORY_MESSAGE_MAX_CHARS),
+  };
+
+  const bucket = historyMap.get(chatId) || [];
+  bucket.push(entry);
+  if (bucket.length > CHAT_HISTORY_LIMIT) {
+    bucket.splice(0, bucket.length - CHAT_HISTORY_LIMIT);
+  }
+  historyMap.set(chatId, bucket);
+}
+
+function buildChatContext(historyMap, chatId, currentMessageId, count, includeBots = false) {
+  const bucket = historyMap.get(chatId) || [];
+  if (!bucket.length || !count) return '';
+
+  const entries = bucket
+    .filter((item) => item.messageId !== Number(currentMessageId) && (includeBots || !item.isBot))
+    .slice(-count);
+  if (!entries.length) return '';
+
+  const lines = entries.map((item, idx) => {
+    const who = item.username || item.displayName || (item.userId ? `user_${item.userId}` : 'user');
+    return `[${idx + 1}] ${who}: ${item.text}`;
+  });
+  return lines.join('\n');
+}
+
 function getMessageTextData(message) {
   if (typeof message.text === 'string') {
     return {
@@ -477,6 +415,38 @@ function getMessageTextData(message) {
     };
   }
   return { text: '', entities: [] };
+}
+
+function normalizeInlineText(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function formatSenderLabel(sender) {
+  if (!sender) return 'unknown';
+  if (sender.username) return `@${sender.username}`;
+  const first = sender.first_name || '';
+  const last = sender.last_name || '';
+  const full = [first, last].filter(Boolean).join(' ').trim();
+  if (full) return full;
+  if (sender.id) return `user_${sender.id}`;
+  return 'unknown';
+}
+
+function buildReplyQuoteContext(message) {
+  if (!message || !message.reply_to_message) return '';
+
+  const replied = message.reply_to_message;
+  const repliedText = normalizeInlineText(getMessageTextData(replied).text);
+  const selectedQuote = normalizeInlineText(message.quote && message.quote.text);
+  if (!repliedText && !selectedQuote) return '';
+
+  const lines = [
+    'Quoted/replied message context:',
+    `- From: ${formatSenderLabel(replied.from)}`,
+  ];
+  if (repliedText) lines.push(`- Referenced message: ${repliedText}`);
+  if (selectedQuote && selectedQuote !== repliedText) lines.push(`- Quoted excerpt: ${selectedQuote}`);
+  return lines.join('\n');
 }
 
 function isTriggerMentionEntity(entity, sourceText) {
@@ -514,14 +484,6 @@ function isNewChatCommand(text, botUsername) {
   return lower === plain || (withBot && lower === withBot);
 }
 
-function isChatsCommand(text, botUsername) {
-  const lower = (text || '').trim().toLowerCase();
-  if (!lower) return false;
-  const plain = '/chats';
-  const withBot = botUsername ? `/chats@${botUsername.toLowerCase()}` : '';
-  return lower === plain || (withBot && lower === withBot);
-}
-
 function isWhoAmICommand(text, botUsername) {
   const lower = (text || '').trim().toLowerCase();
   if (!lower) return false;
@@ -530,7 +492,51 @@ function isWhoAmICommand(text, botUsername) {
   return lower === plain || (withBot && lower === withBot);
 }
 
-function parseChatSelectCommand(text, botUsername) {
+function isHelpCommand(text, botUsername) {
+  const lower = (text || '').trim().toLowerCase();
+  if (!lower) return false;
+  const plain = '/help';
+  const withBot = botUsername ? `/help@${botUsername.toLowerCase()}` : '';
+  return lower === plain || (withBot && lower === withBot);
+}
+
+function buildHelpText(botUsername) {
+  return [
+    'Telegram Bot Help',
+    '',
+    'Setup (required per chat):',
+    '1. /model <geminifast|aimode|none>',
+    '2. /newchat  (or /chat then /chat <number>)',
+    '',
+    'Commands:',
+    '/help - Show this help text',
+    '/whoami - Show your Telegram user ID and chat ID',
+    '/model - Show current model + available models',
+    '/model geminifast - Enable Gemini Fast mode',
+    '/model aimode - Enable Google AI Mode',
+    '/model none - Disable prompt responses (silent mode)',
+    '/newchat - Start a new chat in current model',
+    '/chat - List recent chats in current model',
+    '/chat <number> - Select a chat from latest /chat list',
+    '',
+    'Trigger rules:',
+    '- Message must include @google_ai_mode_bot',
+    '- Replies without a tag do not trigger the bot',
+    '',
+    'Prompt behavior:',
+    '- Tagged messages remove @google_ai_mode_bot before sending to AI',
+    '- If the remaining tagged text starts with "~", it tells the AI to give a brief answer',
+    '- No ~ is a standard answer',
+    '- If you tag while replying/quoting, referenced text is included as context',
+    '',
+    'Extra context directives (start of prompt):',
+    '- [[last:X]] include last X non-bot messages (max 50)',
+    '- [[last:X:all]] include last X messages including bot',
+    '- Works with concise mode too: ~ [[last:20]] ...',
+  ].join('\n');
+}
+
+function parseChatCommand(text, botUsername) {
   const raw = (text || '').trim();
   if (!raw) return null;
   const parts = raw.split(/\s+/).filter(Boolean);
@@ -539,9 +545,9 @@ function parseChatSelectCommand(text, botUsername) {
   const plain = '/chat';
   const withBot = botUsername ? `/chat@${botUsername.toLowerCase()}` : '';
   if (cmd !== plain && (!withBot || cmd !== withBot)) return null;
-  if (parts.length < 2) return { error: 'Usage: /chat <number>' };
+  if (parts.length < 2) return { list: true };
   const index = Number(parts[1]);
-  if (!Number.isInteger(index) || index < 1) return { error: 'Usage: /chat <number>' };
+  if (!Number.isInteger(index) || index < 1) return { error: 'Usage: /chat [number]' };
   return { index };
 }
 
@@ -556,12 +562,13 @@ function parseModelCommand(text, botUsername) {
   if (cmd !== plain && (!withBot || cmd !== withBot)) return null;
   if (parts.length < 2) return { query: true };
   const model = normalizeModel(parts[1]);
-  if (!model) return { error: 'Usage: /model <geminifast|aimode>' };
+  if (!model) return { error: 'Usage: /model <geminifast|aimode|none>' };
   return { model };
 }
 
 function normalizeModel(value) {
   const v = (value || '').toString().trim().toLowerCase();
+  if (v === 'none' || v === 'off' || v === 'silent') return 'none';
   if (v === 'ai' || v === 'aimode' || v === 'ai-mode') return 'aimode';
   if (v === 'geminifast' || v === 'fast' || v === 'flash' || v === 'gemini') return 'geminifast';
   return '';
@@ -604,9 +611,35 @@ async function sendReply(chatId, replyToMessageId, text) {
   }
 }
 
-function formatChatsReply(chats) {
+function formatModelReplyForTelegram(text) {
+  let output = (text || '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
+  if (!output) return '(No response)';
+
+  const hasLineBreaks = output.includes('\n');
+  if (!hasLineBreaks) {
+    output = output
+      .replace(/\s(\d{1,2}\.)\s+/g, '\n\n$1 ')
+      .replace(/\s([A-Z][A-Za-z'() -]{2,40}:)\s+/g, '\n- $1 ');
+  }
+
+  return output
+    .split('\n')
+    .map((line) => line.replace(/[ \t]+/g, ' ').trimEnd())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function formatChatTitlePreview(title, model) {
+  const clean = (title || '').replace(/\s+/g, ' ').trim() || 'Untitled chat';
+  if (model !== 'aimode') return clean;
+  if (clean.length <= AI_MODE_CHAT_PREVIEW_MAX) return clean;
+  return `${clean.slice(0, AI_MODE_CHAT_PREVIEW_MAX - 3).trimEnd()}...`;
+}
+
+function formatChatsReply(chats, model) {
   if (!chats.length) return 'No recent chats found.';
-  const lines = chats.map((chat, idx) => `${idx + 1}. ${chat.title}`);
+  const lines = chats.map((chat, idx) => `${idx + 1}. ${formatChatTitlePreview(chat.title, model)}`);
   return `Recent chats:\n${lines.join('\n')}\n\nUse /chat <number> to switch.`;
 }
 
@@ -628,13 +661,51 @@ function chunkText(text, maxLen) {
 
 async function registerTelegramCommands() {
   const commands = [
+    { command: 'help', description: 'Show usage instructions' },
     { command: 'newchat', description: 'Start a fresh chat in current model' },
-    { command: 'chats', description: 'List recent chats in current model' },
-    { command: 'chat', description: 'Switch chat: /chat <number>' },
+    { command: 'chat', description: 'List or switch chats: /chat [number]' },
     { command: 'whoami', description: 'Show your Telegram user ID' },
-    { command: 'model', description: 'Show or set model: /model geminifast|aimode' },
+    { command: 'model', description: 'Show or set model: /model geminifast|aimode|none' },
   ];
-  await telegramCall('setMyCommands', { commands });
+  const scopes = [
+    null,
+    { type: 'all_private_chats' },
+    { type: 'all_group_chats' },
+  ];
+  for (const scope of scopes) {
+    const payload = scope ? { commands, scope } : { commands };
+    await telegramCall('setMyCommands', payload);
+  }
+}
+
+function getUserLogMeta(message) {
+  const userId = String((message && message.from && message.from.id) || '');
+  const username = message && message.from && message.from.username ? `@${message.from.username}` : '(none)';
+  const chatId = String((message && message.chat && message.chat.id) || '');
+  return { userId: userId || '(unknown)', username, chatId: chatId || '(unknown)' };
+}
+
+function logIncomingEvent(message, type, content) {
+  const { userId, username, chatId } = getUserLogMeta(message);
+  const compact = (content || '').replace(/\s+/g, ' ').trim().slice(0, 1000);
+  console.log(
+    `[incoming] type=${type} chat_id=${chatId} user_id=${userId} username=${username} text=${JSON.stringify(compact)}`
+  );
+}
+
+function detectTriggerType(message, text, entities) {
+  if (entities.some((entity) => isTriggerMentionEntity(entity, text))) return 'tag';
+  if (!TELEGRAM_TRIGGER_USERNAME) return 'message';
+  const mentionRegex = new RegExp(`(^|\\s)@${escapeRegex(TELEGRAM_TRIGGER_USERNAME)}\\b`, 'i');
+  return mentionRegex.test(text || '') ? 'tag' : 'message';
+}
+
+function getChatSession(sessionByChatId, chatId) {
+  const existing = sessionByChatId.get(chatId);
+  if (existing) return existing;
+  const created = { model: '', chatSelected: false };
+  sessionByChatId.set(chatId, created);
+  return created;
 }
 
 async function main() {
@@ -650,12 +721,13 @@ async function main() {
   console.log(`Telegram bot ready as @${botUsername || 'unknown'}.`);
   console.log(`Trigger username: ${TELEGRAM_TRIGGER_USERNAME ? '@' + TELEGRAM_TRIGGER_USERNAME : '(reply-only mode)'}`);
   console.log(`Browser endpoint: http://127.0.0.1:${BROWSER_PORT}`);
-  console.log(`Default model: ${DEFAULT_MODEL}`);
+  console.log('Startup state: model=(not set), chat=(not selected)');
 
   let offset = 0;
   let queue = Promise.resolve();
   const recentChatsByTelegramChatId = new Map();
-  const modelByTelegramChatId = new Map();
+  const sessionByTelegramChatId = new Map();
+  const recentMessageHistoryByChatId = new Map();
 
   while (true) {
     try {
@@ -669,13 +741,16 @@ async function main() {
         offset = update.update_id + 1;
         const message = update.message;
         if (!message) continue;
+        addMessageToChatHistory(recentMessageHistoryByChatId, message);
         if (!isSenderAllowed(message)) continue;
 
         const text = (message.text || message.caption || '').trim();
         const telegramChatId = String(message.chat.id);
-        const currentModel = modelByTelegramChatId.get(telegramChatId) || DEFAULT_MODEL;
+        const session = getChatSession(sessionByTelegramChatId, telegramChatId);
+        const currentModel = session.model;
 
         if (isWhoAmICommand(text, botUsername)) {
+          logIncomingEvent(message, 'command:/whoami', text);
           const userId = String(message.from && message.from.id ? message.from.id : '');
           const username = message.from && message.from.username ? `@${message.from.username}` : '(none)';
           await sendReply(
@@ -686,87 +761,215 @@ async function main() {
           continue;
         }
 
+        if (isHelpCommand(text, botUsername)) {
+          logIncomingEvent(message, 'command:/help', text);
+          await sendReply(message.chat.id, message.message_id, buildHelpText(botUsername));
+          continue;
+        }
+
         const modelCommand = parseModelCommand(text, botUsername);
         if (modelCommand) {
+          logIncomingEvent(message, 'command:/model', text);
           if (modelCommand.error) {
             await sendReply(message.chat.id, message.message_id, modelCommand.error);
             continue;
           }
           if (modelCommand.query) {
-            await sendReply(message.chat.id, message.message_id, `Current model: ${currentModel}`);
+            if (!currentModel) {
+              await sendReply(
+                message.chat.id,
+                message.message_id,
+                'Current model: (not set)\nAvailable models: geminifast, aimode, none\nUse /model <geminifast|aimode|none>.'
+              );
+            } else {
+              const chatState = session.chatSelected ? 'selected' : 'not selected';
+              await sendReply(
+                message.chat.id,
+                message.message_id,
+                `Current model: ${currentModel}\nCurrent chat: ${chatState}\nAvailable models: geminifast, aimode, none\nUse /model <geminifast|aimode|none>.`
+              );
+            }
             continue;
           }
-          modelByTelegramChatId.set(telegramChatId, modelCommand.model);
-          await sendReply(message.chat.id, message.message_id, `Model set to ${modelCommand.model}.`);
+          session.model = modelCommand.model;
+          session.chatSelected = false;
+          recentChatsByTelegramChatId.delete(telegramChatId);
+          if (modelCommand.model === 'none') {
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              'Model set to none.\nBot responses are now disabled for prompts in this chat.\nUse /model geminifast or /model aimode to re-enable.'
+            );
+          } else {
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              `Model set to ${modelCommand.model}.\nNow run /newchat or /chat then /chat <number>.`
+            );
+          }
           continue;
         }
 
         if (isNewChatCommand(text, botUsername)) {
+          logIncomingEvent(message, 'command:/newchat', text);
+          if (!currentModel) {
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              'Model not selected. Use /model geminifast or /model aimode first.'
+            );
+            continue;
+          }
+          if (currentModel === 'none') {
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              'Model is none (responses disabled). Use /model geminifast or /model aimode first.'
+            );
+            continue;
+          }
           queue = queue.then(async () => {
             await bridge.startNewChat(currentModel);
+            session.chatSelected = true;
             await sendReply(message.chat.id, message.message_id, `Started a new ${currentModel} chat.`);
-          }).catch((err) => console.error('newchat error:', err.message));
-          continue;
-        }
-
-        if (isChatsCommand(text, botUsername)) {
-          queue = queue.then(async () => {
-            const chats = await bridge.listRecentChats(currentModel, 20);
-            recentChatsByTelegramChatId.set(telegramChatId, chats.map((c) => ({ ...c, model: currentModel })));
-            await sendReply(message.chat.id, message.message_id, formatChatsReply(chats));
           }).catch(async (err) => {
-            console.error('chats error:', err.message);
+            console.error('newchat error:', err.message);
             await sendReply(message.chat.id, message.message_id, `Error: ${err.message}`);
           });
           continue;
         }
 
-        const chatSelect = parseChatSelectCommand(text, botUsername);
-        if (chatSelect) {
-          if (chatSelect.error) {
-            await sendReply(message.chat.id, message.message_id, chatSelect.error);
+        const chatCommand = parseChatCommand(text, botUsername);
+        if (chatCommand) {
+          logIncomingEvent(message, 'command:/chat', text);
+          if (!currentModel) {
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              'Model not selected. Use /model geminifast or /model aimode first.'
+            );
+            continue;
+          }
+          if (currentModel === 'none') {
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              'Model is none (responses disabled). Use /model geminifast or /model aimode first.'
+            );
+            continue;
+          }
+          if (chatCommand.error) {
+            await sendReply(message.chat.id, message.message_id, chatCommand.error);
             continue;
           }
           queue = queue.then(async () => {
-            const chats = recentChatsByTelegramChatId.get(telegramChatId) || [];
-            if (!chats.length) {
-              await sendReply(message.chat.id, message.message_id, 'No chat list is cached yet. Run /chats first.');
+            if (chatCommand.list) {
+              const chats = await bridge.listRecentChats(currentModel, 20);
+              recentChatsByTelegramChatId.set(telegramChatId, chats.map((c) => ({ ...c, model: currentModel })));
+              await sendReply(message.chat.id, message.message_id, formatChatsReply(chats, currentModel));
               return;
             }
-            const selected = chats[chatSelect.index - 1];
+            const chats = recentChatsByTelegramChatId.get(telegramChatId) || [];
+            if (!chats.length) {
+              await sendReply(message.chat.id, message.message_id, 'No chat list is cached yet. Run /chat first.');
+              return;
+            }
+            const selected = chats[chatCommand.index - 1];
             if (!selected) {
               await sendReply(
                 message.chat.id,
                 message.message_id,
-                `Invalid chat number. Choose 1-${chats.length} from the latest /chats list.`
+                `Invalid chat number. Choose 1-${chats.length} from the latest /chat list.`
               );
               return;
             }
             await bridge.selectChat(selected);
+            session.chatSelected = true;
             await sendReply(
               message.chat.id,
               message.message_id,
-              `Switched to chat ${chatSelect.index}: ${selected.title}\n(No previous messages were sent to Telegram.)`
+              `Switched to chat ${chatCommand.index}: ${formatChatTitlePreview(selected.title, currentModel)}\n(No previous messages were sent to Telegram.)`
             );
           }).catch(async (err) => {
-            console.error('chat select error:', err.message);
+            console.error('chat command error:', err.message);
             await sendReply(message.chat.id, message.message_id, `Error: ${err.message}`);
           });
           continue;
         }
 
         if (!shouldHandleMessage(message)) continue;
+        const { entities } = getMessageTextData(message);
+        const triggerType = detectTriggerType(message, text, entities);
+        logIncomingEvent(message, `prompt:${triggerType}`, text);
+
+        if (currentModel === 'none') {
+          // Silent mode: ignore triggered prompts while model is explicitly set to none.
+          continue;
+        }
+        if (!currentModel) {
+          await sendReply(
+            message.chat.id,
+            message.message_id,
+            'Model not selected. Use /model geminifast or /model aimode first.'
+          );
+          continue;
+        }
+        if (!session.chatSelected) {
+          await sendReply(
+            message.chat.id,
+            message.message_id,
+            'No chat selected. Run /newchat to start one, or /chat then /chat <number> to select one.'
+          );
+          continue;
+        }
 
         const prompt = extractPrompt(message);
         if (!prompt) {
           await sendReply(message.chat.id, message.message_id, 'I saw the trigger, but there was no message text to send.');
           continue;
         }
+        const directive = parseChatContextDirective(prompt);
+        const promptWithMode = applyTelegramPromptMode(directive.prompt);
+        if (!promptWithMode) {
+          await sendReply(
+            message.chat.id,
+            message.message_id,
+            'Usage: [[last:20]] <message> or [[last:20:all]] <message> (also works with leading ~).'
+          );
+          continue;
+        }
+
+        let promptForAi = promptWithMode;
+        const extraContextBlocks = [];
+        if (directive.count > 0) {
+          const chatContext = buildChatContext(
+            recentMessageHistoryByChatId,
+            telegramChatId,
+            message.message_id,
+            directive.count,
+            directive.includeBots
+          );
+          if (chatContext) {
+            const contextLabel = directive.includeBots
+              ? `Chat context (last ${directive.count} messages, including bot):`
+              : `Chat context (last ${directive.count} non-bot messages):`;
+            extraContextBlocks.push([contextLabel, chatContext].join('\n'));
+          }
+        }
+        const replyQuoteContext = buildReplyQuoteContext(message);
+        if (replyQuoteContext) extraContextBlocks.push(replyQuoteContext);
+        if (extraContextBlocks.length) {
+          promptForAi = [
+            ...extraContextBlocks,
+            `User request: ${promptWithMode}`,
+          ].join('\n\n');
+        }
 
         queue = queue.then(async () => {
           await telegramCall('sendChatAction', { chat_id: message.chat.id, action: 'typing' });
-          const answer = await bridge.ask(prompt, currentModel);
-          await sendReply(message.chat.id, message.message_id, answer);
+          const answer = await bridge.ask(promptForAi, currentModel);
+          const formattedAnswer = formatModelReplyForTelegram(answer);
+          await sendReply(message.chat.id, message.message_id, formattedAnswer);
         }).catch(async (err) => {
           console.error('message error:', err.message);
           await sendReply(message.chat.id, message.message_id, `Error: ${err.message}`);

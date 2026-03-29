@@ -144,17 +144,21 @@ Use `--help` for all flags (connect to existing Chrome, reuse target, etc.).
 ### Behavior
 
 - `/newchat` starts a fresh chat in the current model.
-- `/chats` returns a numbered list of recent Gemini chats.
-- `/chat <number>` switches to a chat from the latest `/chats` list for that Telegram chat.
+- `/chat` returns a numbered list of recent chats in the current model.
+- `/chat <number>` switches to a chat from the latest `/chat` list for that Telegram chat.
+- `/help` shows Telegram bot usage and trigger instructions.
 - `/whoami` shows your Telegram `user_id` (plus username/chat ID).
 - `/model` shows current model for that Telegram chat.
-- `/model geminifast` or `/model aimode` switches between Gemini Fast and AI Mode.
+- `/model geminifast`, `/model aimode`, or `/model none` sets the mode (`none` disables prompt responses in that Telegram chat).
+- On startup per Telegram chat, model and chat are unset. You must run `/model ...` and then `/newchat` or `/chat <number>` before prompts will be sent.
+- `[[last:X]]` at the start of a triggered message prepends the last `X` non-bot chat messages as context (max `50`), for example `@YourBot [[last:20]] Summarize`.
+- `[[last:X:all]]` includes bot messages too (including this chatbot's own replies), for example `@YourBot [[last:20:all]] Summarize`.
 - A message is processed when:
   - It contains `@TELEGRAM_TRIGGER_USERNAME`, or
   - It is a reply to another message.
 - The bot responds by replying to that Telegram message (`reply_to_message_id`), so the response is quoted/threaded.
 - Switching chats does not dump existing Gemini history into Telegram.
-- On startup, the bot registers Telegram command menu entries via `setMyCommands`.
+- On startup, the bot registers Telegram command menu entries via `setMyCommands` for default, private-chat, and group-chat scopes.
 
 ### Environment Variables
 
@@ -163,8 +167,6 @@ Use `--help` for all flags (connect to existing Chrome, reuse target, etc.).
 - `BROWSER_PORT` (optional, default `9233`): Chromium remote debugging port.
 - `GEMINI_URL` (optional): Override Gemini URL.
 - `AI_MODE_URL` (optional): Override AI Mode URL.
-- `TELEGRAM_DEFAULT_MODEL` (optional, default `geminifast`): Initial model per Telegram chat.
-- `TELEGRAM_DEFAULT_MODE` (optional): Backward-compatible alias for `TELEGRAM_DEFAULT_MODEL`.
 - `TELEGRAM_POLL_TIMEOUT_SECONDS` (optional, default `30`): Telegram long-poll timeout.
 - `TELEGRAM_ALLOWED_CHAT_IDS` (optional): Comma-separated allowlist of chat IDs.
 - `TELEGRAM_ALLOWED_USER_IDS` (optional): Comma-separated allowlist of Telegram numeric user IDs. If set, only those users can interact with the bot.

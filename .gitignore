@@ -15,5 +15,6 @@
 !package-lock.json
 !lib/
 !lib/questions.js
+!lib/browser-ai-interface.js
 !test/
 !test/questions.test.js

@@ -2,7 +2,39 @@
 'use strict';
 
 const puppeteer = require('puppeteer-core');
+const util = require('util');
 const { BrowserAiInterface } = require('./lib/browser-ai-interface');
+
+function formatLogPrefix() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  const ms = String(now.getMilliseconds()).padStart(3, '0');
+  return `[(${year}-${month}-${day}) ${hours}:${minutes}:${seconds}.${ms}]`;
+}
+
+function installTimestampedConsole() {
+  if (global.__chatbotTimestampedConsoleInstalled) return;
+  global.__chatbotTimestampedConsoleInstalled = true;
+
+  const wrap = (stream) => (...args) => {
+    const rendered = util.format(...args).replace(/\n$/, '');
+    const lines = rendered.split('\n');
+    for (const line of lines) {
+      stream.write(`${formatLogPrefix()} ${line}\n`);
+    }
+  };
+
+  console.log = wrap(process.stdout);
+  console.error = wrap(process.stderr);
+  console.warn = wrap(process.stderr);
+}
+
+installTimestampedConsole();
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const TELEGRAM_TRIGGER_USERNAME = (process.env.TELEGRAM_TRIGGER_USERNAME || '')
@@ -23,6 +55,7 @@ const CHAT_CONTEXT_DIRECTIVE_MAX = 50;
 const CHAT_HISTORY_LIMIT = 300;
 const HISTORY_MESSAGE_MAX_CHARS = 500;
 const AI_MODE_CHAT_PREVIEW_MAX = 120;
+const TELEGRAM_INCLUDE_CHANNEL_ID = String(process.env.TELEGRAM_INCLUDE_CHANNEL_ID || '').trim();
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error('Missing TELEGRAM_BOT_TOKEN environment variable.');
@@ -323,24 +356,71 @@ function extractPrompt(message) {
   return body;
 }
 
+function parseIncludeMessageIds(spec) {
+  const out = [];
+  const seen = new Set();
+  const parts = String(spec || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!parts.length) return null;
+
+  for (const part of parts) {
+    const range = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (range) {
+      const start = Number(range[1]);
+      const end = Number(range[2]);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end <= 0) return null;
+      const step = start <= end ? 1 : -1;
+      for (let id = start; step > 0 ? id <= end : id >= end; id += step) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+      }
+      continue;
+    }
+    if (!/^\d+$/.test(part)) return null;
+    const id = Number(part);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
 function parseChatContextDirective(prompt) {
   const input = (prompt || '').trim();
-  if (!input) return { count: 0, includeBots: false, prompt: '' };
+  if (!input) return { messageIds: [], prompt: '' };
 
-  const direct = input.match(/^\[\[last:(\d{1,3})(:all)?\]\]\s*/i);
+  const direct = input.match(/^\[\[include:([^\]]+)\]\]\s*/i);
   if (direct) {
-    const count = Math.max(1, Math.min(CHAT_CONTEXT_DIRECTIVE_MAX, Number(direct[1])));
-    return { count, includeBots: Boolean(direct[2]), prompt: input.slice(direct[0].length).trim() };
+    const parsed = parseIncludeMessageIds(direct[1]);
+    if (!parsed || !parsed.length) {
+      return { messageIds: [], prompt: input.slice(direct[0].length).trim(), error: 'Invalid include list. Use [[include:400-402,404,407]].' };
+    }
+    return {
+      messageIds: parsed.slice(0, CHAT_CONTEXT_DIRECTIVE_MAX),
+      prompt: input.slice(direct[0].length).trim(),
+      truncated: parsed.length > CHAT_CONTEXT_DIRECTIVE_MAX,
+    };
   }
 
-  const conciseFirst = input.match(/^~\s*\[\[last:(\d{1,3})(:all)?\]\]\s*/i);
+  const conciseFirst = input.match(/^~\s*\[\[include:([^\]]+)\]\]\s*/i);
   if (conciseFirst) {
-    const count = Math.max(1, Math.min(CHAT_CONTEXT_DIRECTIVE_MAX, Number(conciseFirst[1])));
+    const parsed = parseIncludeMessageIds(conciseFirst[1]);
     const rest = input.slice(conciseFirst[0].length).trim();
-    return { count, includeBots: Boolean(conciseFirst[2]), prompt: rest ? `~ ${rest}` : '~' };
+    if (!parsed || !parsed.length) {
+      return { messageIds: [], prompt: rest ? `~ ${rest}` : '~', error: 'Invalid include list. Use [[include:400-402,404,407]].' };
+    }
+    return {
+      messageIds: parsed.slice(0, CHAT_CONTEXT_DIRECTIVE_MAX),
+      prompt: rest ? `~ ${rest}` : '~',
+      truncated: parsed.length > CHAT_CONTEXT_DIRECTIVE_MAX,
+    };
   }
 
-  return { count: 0, includeBots: false, prompt: input };
+  return { messageIds: [], prompt: input };
 }
 
 function applyTelegramPromptMode(prompt) {
@@ -385,20 +465,123 @@ function addMessageToChatHistory(historyMap, message) {
   historyMap.set(chatId, bucket);
 }
 
-function buildChatContext(historyMap, chatId, currentMessageId, count, includeBots = false) {
+function findHistoryMessageById(historyMap, chatId, messageId) {
   const bucket = historyMap.get(chatId) || [];
-  if (!bucket.length || !count) return '';
+  for (let i = bucket.length - 1; i >= 0; i -= 1) {
+    if (Number(bucket[i].messageId || 0) === Number(messageId || 0)) return bucket[i];
+  }
+  return null;
+}
 
-  const entries = bucket
-    .filter((item) => item.messageId !== Number(currentMessageId) && (includeBots || !item.isBot))
-    .slice(-count);
-  if (!entries.length) return '';
+function formatSenderLabelFromHistory(entry) {
+  if (!entry) return 'unknown';
+  if (entry.displayName) return entry.displayName;
+  if (entry.username) return entry.username;
+  if (entry.userId) return `user_${entry.userId}`;
+  return 'unknown';
+}
 
-  const lines = entries.map((item, idx) => {
-    const who = item.username || item.displayName || (item.userId ? `user_${item.userId}` : 'user');
-    return `[${idx + 1}] ${who}: ${item.text}`;
-  });
-  return lines.join('\n');
+function formatUserLabel(user) {
+  if (!user) return '';
+  const first = user.first_name || '';
+  const last = user.last_name || '';
+  const full = [first, last].filter(Boolean).join(' ').trim();
+  if (full) return full;
+  if (user.username) return `@${user.username}`;
+  if (user.id) return `user_${user.id}`;
+  return '';
+}
+
+function formatSenderFromCopiedMessage(msg) {
+  if (!msg || typeof msg !== 'object') return '';
+  const origin = msg.forward_origin;
+  if (origin && typeof origin === 'object') {
+    if (origin.type === 'user') {
+      const u = origin.sender_user || null;
+      const label = formatUserLabel(u);
+      if (label) return label;
+    }
+    if (origin.type === 'hidden_user' && origin.sender_user_name) return String(origin.sender_user_name);
+    if (origin.type === 'chat' && origin.sender_chat && origin.sender_chat.title) return String(origin.sender_chat.title);
+    if (origin.type === 'channel' && origin.chat && origin.chat.title) return String(origin.chat.title);
+  }
+  const ff = formatUserLabel(msg.forward_from);
+  if (ff) return ff;
+  if (msg.forward_sender_name) return String(msg.forward_sender_name);
+  return '';
+}
+
+function extractMessageContentForInclude(message) {
+  const { text } = getMessageTextData(message || {});
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (normalized) return normalized.slice(0, HISTORY_MESSAGE_MAX_CHARS);
+  if (message && message.photo) return '[photo]';
+  if (message && message.document) return '[document]';
+  if (message && message.video) return '[video]';
+  if (message && message.audio) return '[audio]';
+  if (message && message.voice) return '[voice]';
+  if (message && message.sticker) return '[sticker]';
+  return '[non-text message]';
+}
+
+async function buildIncludedMessagesContext(options) {
+  const sourceChatId = String(options && options.sourceChatId ? options.sourceChatId : '');
+  const sourceMessageIds = Array.isArray(options && options.sourceMessageIds) ? options.sourceMessageIds : [];
+  const includeChannelId = String(options && options.includeChannelId ? options.includeChannelId : '');
+  const historyMap = options && options.historyMap ? options.historyMap : new Map();
+  const sourceHistoryChatId = String(options && options.sourceHistoryChatId ? options.sourceHistoryChatId : sourceChatId);
+  if (!sourceChatId || !includeChannelId || !sourceMessageIds.length) return { context: '', forwardedCount: 0, missingIds: [] };
+
+  const lines = [];
+  const missingIds = [];
+  let forwardedCount = 0;
+  for (const sourceId of sourceMessageIds) {
+    let forwardedMessage = null;
+    let forwardedMessageId = 0;
+    try {
+      console.log(`[include-forward] forward start source_chat_id=${sourceChatId} source_message_id=${sourceId}`);
+      forwardedMessage = await telegramCall('forwardMessage', {
+        chat_id: includeChannelId,
+        from_chat_id: sourceChatId,
+        message_id: Number(sourceId),
+        disable_notification: true,
+      });
+      forwardedMessageId = Number(forwardedMessage && forwardedMessage.message_id ? forwardedMessage.message_id : 0);
+      if (!forwardedMessageId) {
+        console.log(`[include-forward] forward failed source_message_id=${sourceId} reason=empty-forwarded-id`);
+        missingIds.push(sourceId);
+        continue;
+      }
+      forwardedCount += 1;
+      console.log(`[include-forward] forward done source_message_id=${sourceId} forwarded_message_id=${forwardedMessageId}`);
+
+      const historyEntry = findHistoryMessageById(historyMap, sourceHistoryChatId, sourceId);
+      const senderFromForwarded = formatSenderFromCopiedMessage(forwardedMessage);
+      const sender = senderFromForwarded || formatSenderLabelFromHistory(historyEntry) || 'unknown';
+      const content = extractMessageContentForInclude(forwardedMessage) || (historyEntry && historyEntry.text ? historyEntry.text : '');
+      if (!content) {
+        missingIds.push(sourceId);
+        continue;
+      }
+      lines.push(`[${sourceId}] ${sender}: ${content}`);
+    } catch (err) {
+      console.log(`[include-forward] forward failed source_message_id=${sourceId} reason=${err && err.message ? err.message : 'unknown'}`);
+      missingIds.push(sourceId);
+    } finally {
+      if (forwardedMessageId) {
+        console.log(`[include-forward] delete forwarded_message_id=${forwardedMessageId}`);
+        telegramCall('deleteMessage', {
+          chat_id: includeChannelId,
+          message_id: forwardedMessageId,
+        }).catch(() => {});
+      }
+    }
+  }
+  return {
+    context: lines.join('\n'),
+    forwardedCount,
+    missingIds,
+  };
 }
 
 function getMessageTextData(message) {
@@ -415,38 +598,6 @@ function getMessageTextData(message) {
     };
   }
   return { text: '', entities: [] };
-}
-
-function normalizeInlineText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
-function formatSenderLabel(sender) {
-  if (!sender) return 'unknown';
-  if (sender.username) return `@${sender.username}`;
-  const first = sender.first_name || '';
-  const last = sender.last_name || '';
-  const full = [first, last].filter(Boolean).join(' ').trim();
-  if (full) return full;
-  if (sender.id) return `user_${sender.id}`;
-  return 'unknown';
-}
-
-function buildReplyQuoteContext(message) {
-  if (!message || !message.reply_to_message) return '';
-
-  const replied = message.reply_to_message;
-  const repliedText = normalizeInlineText(getMessageTextData(replied).text);
-  const selectedQuote = normalizeInlineText(message.quote && message.quote.text);
-  if (!repliedText && !selectedQuote) return '';
-
-  const lines = [
-    'Quoted/replied message context:',
-    `- From: ${formatSenderLabel(replied.from)}`,
-  ];
-  if (repliedText) lines.push(`- Referenced message: ${repliedText}`);
-  if (selectedQuote && selectedQuote !== repliedText) lines.push(`- Quoted excerpt: ${selectedQuote}`);
-  return lines.join('\n');
 }
 
 function isTriggerMentionEntity(entity, sourceText) {
@@ -506,7 +657,8 @@ function buildHelpText(botUsername) {
     '',
     'Setup (required per chat):',
     '1. Default model is aimode (or change with /model <geminifast|aimode|none>)',
-    '2. Run /newchat  (or /chat then /chat <number>)',
+    '2. A new chat is auto-started on first prompt and after each /model switch',
+    '3. Optional: /chat then /chat <number> to switch to an existing chat',
     '',
     'Commands:',
     '/help - Show this help text',
@@ -527,12 +679,11 @@ function buildHelpText(botUsername) {
     '- Tagged messages remove @google_ai_mode_bot before sending to AI',
     '- If the remaining tagged text starts with "~", it tells the AI to give a brief answer',
     '- No ~ is a standard answer',
-    '- If you tag while replying/quoting, referenced text is included as context',
     '',
     'Extra context directives (start of prompt):',
-    '- [[last:X]] include last X non-bot messages (max 50)',
-    '- [[last:X:all]] include last X messages including bot',
-    '- Works with concise mode too: ~ [[last:20]] ...',
+    '- [[include:400-402,404,407]] include exact Telegram message IDs',
+    '- Works with concise mode too: ~ [[include:400-402,404]] ...',
+    '- Requires TELEGRAM_INCLUDE_CHANNEL_ID (private channel where bot is admin)',
   ].join('\n');
 }
 
@@ -614,13 +765,45 @@ async function telegramCallMultipart(method, formData) {
 }
 
 async function sendPhotoReply(chatId, replyToMessageId, photoBuffer, caption = '') {
+  const startedAt = Date.now();
+  const captionLen = String(caption || '').length;
+  const photoBytes = photoBuffer && typeof photoBuffer.length === 'number' ? photoBuffer.length : 0;
+  console.log(
+    `[telegram-send] start method=sendPhoto chat_id=${chatId} reply_to=${replyToMessageId || '(none)'} caption_len=${captionLen} photo_bytes=${photoBytes}`
+  );
   const form = new FormData();
   form.set('chat_id', String(chatId));
   if (replyToMessageId) form.set('reply_to_message_id', String(replyToMessageId));
   form.set('allow_sending_without_reply', 'true');
   if (caption) form.set('caption', String(caption).slice(0, 1024));
   form.append('photo', new Blob([photoBuffer], { type: 'image/png' }), 'table.png');
-  await telegramCallMultipart('sendPhoto', form);
+  const result = await telegramCallMultipart('sendPhoto', form);
+  const messageId = result && result.message_id ? result.message_id : '(unknown)';
+  console.log(
+    `[telegram-send] done method=sendPhoto chat_id=${chatId} message_id=${messageId} duration_ms=${Date.now() - startedAt}`
+  );
+  return result;
+}
+
+async function sendMessageWithLog(chatId, messagePayload, context = {}) {
+  const startedAt = Date.now();
+  const chunkIndex = Number.isInteger(context.chunkIndex) ? context.chunkIndex : 1;
+  const chunkTotal = Number.isInteger(context.chunkTotal) ? context.chunkTotal : 1;
+  const kind = context.kind ? String(context.kind) : 'text';
+  const parseMode = messagePayload && messagePayload.parse_mode ? String(messagePayload.parse_mode) : '(none)';
+  const textLen = String((messagePayload && messagePayload.text) || '').length;
+  const replyTo = messagePayload && messagePayload.reply_to_message_id
+    ? String(messagePayload.reply_to_message_id)
+    : '(none)';
+  console.log(
+    `[telegram-send] start method=sendMessage kind=${kind} chat_id=${chatId} reply_to=${replyTo} parse_mode=${parseMode} chunk=${chunkIndex}/${chunkTotal} text_len=${textLen}`
+  );
+  const result = await telegramCall('sendMessage', messagePayload);
+  const messageId = result && result.message_id ? result.message_id : '(unknown)';
+  console.log(
+    `[telegram-send] done method=sendMessage kind=${kind} chat_id=${chatId} message_id=${messageId} duration_ms=${Date.now() - startedAt}`
+  );
+  return result;
 }
 
 async function sendReply(chatId, replyToMessageId, payload) {
@@ -643,12 +826,16 @@ async function sendReply(chatId, replyToMessageId, payload) {
         const fallback = String(part.markdown || '').trim() || '(table)';
         const chunks = chunkText(fallback, TELEGRAM_MAX_MESSAGE);
         for (let i = 0; i < chunks.length; i += 1) {
-          await telegramCall('sendMessage', {
+          await sendMessageWithLog(chatId, {
             chat_id: chatId,
             text: chunks[i],
             reply_to_message_id: firstMessageId,
             allow_sending_without_reply: true,
             disable_web_page_preview: true,
+          }, {
+            kind: 'table-fallback',
+            chunkIndex: i + 1,
+            chunkTotal: chunks.length,
           });
           firstMessageId = undefined;
         }
@@ -669,7 +856,11 @@ async function sendReply(chatId, replyToMessageId, payload) {
           disable_web_page_preview: true,
         };
         if (partParseMode) messagePayload.parse_mode = partParseMode;
-        await telegramCall('sendMessage', messagePayload);
+        await sendMessageWithLog(chatId, messagePayload, {
+          kind: 'part-text',
+          chunkIndex: i + 1,
+          chunkTotal: partChunks.length,
+        });
         firstMessageId = undefined;
       }
     }
@@ -691,7 +882,11 @@ async function sendReply(chatId, replyToMessageId, payload) {
       disable_web_page_preview: true,
     };
     if (parseMode) messagePayload.parse_mode = parseMode;
-    await telegramCall('sendMessage', messagePayload);
+    await sendMessageWithLog(chatId, messagePayload, {
+      kind: 'text',
+      chunkIndex: i + 1,
+      chunkTotal: chunks.length,
+    });
   }
 }
 
@@ -1051,7 +1246,13 @@ function detectTriggerType(message, text, entities) {
 function getChatSession(sessionByChatId, chatId) {
   const existing = sessionByChatId.get(chatId);
   if (existing) return existing;
-  const created = { model: 'aimode', chatSelected: false, selectedChatKey: '', selectedChatTitle: '' };
+  const created = {
+    model: 'aimode',
+    chatSelected: true,
+    selectedChatKey: '',
+    selectedChatTitle: '(auto new chat pending)',
+    autoNewChatPending: true,
+  };
   sessionByChatId.set(chatId, created);
   return created;
 }
@@ -1069,7 +1270,8 @@ async function main() {
   console.log(`Telegram bot ready as @${botUsername || 'unknown'}.`);
   console.log(`Trigger username: ${TELEGRAM_TRIGGER_USERNAME ? '@' + TELEGRAM_TRIGGER_USERNAME : '(reply-only mode)'}`);
   console.log(`Browser endpoint: http://127.0.0.1:${BROWSER_PORT}`);
-  console.log('Startup state: default model=aimode, chat=(not selected)');
+  console.log('Startup state: default model=aimode, chat=(auto new chat pending)');
+  console.log(`Include channel: ${TELEGRAM_INCLUDE_CHANNEL_ID || '(not configured)'}`);
 
   let offset = 0;
   let queue = Promise.resolve();
@@ -1130,7 +1332,9 @@ async function main() {
                 'Current model: (not set)\nAvailable models: geminifast, aimode, none\nUse /model <geminifast|aimode|none>.'
               );
             } else {
-              const chatState = session.chatSelected ? 'selected' : 'not selected';
+              const chatState = session.autoNewChatPending
+                ? 'auto new chat pending'
+                : (session.chatSelected ? 'selected' : 'not selected');
               await sendReply(
                 message.chat.id,
                 message.message_id,
@@ -1143,6 +1347,7 @@ async function main() {
           session.chatSelected = false;
           session.selectedChatKey = '';
           session.selectedChatTitle = '';
+          session.autoNewChatPending = false;
           recentChatsByTelegramChatId.delete(telegramChatId);
           if (modelCommand.model === 'none') {
             await sendReply(
@@ -1151,11 +1356,24 @@ async function main() {
               'Model set to none.\nBot responses are now disabled for prompts in this chat.\nUse /model geminifast or /model aimode to re-enable.'
             );
           } else {
-            await sendReply(
-              message.chat.id,
-              message.message_id,
-              `Model set to ${modelCommand.model}.\nNow run /newchat or /chat then /chat <number>.`
-            );
+            session.chatSelected = true;
+            session.selectedChatTitle = '(auto new chat pending)';
+            session.autoNewChatPending = true;
+            queue = queue.then(async () => {
+              await bridge.startNewChat(modelCommand.model);
+              session.autoNewChatPending = false;
+              session.selectedChatTitle = '(new chat started automatically)';
+              await sendReply(
+                message.chat.id,
+                message.message_id,
+                `Model set to ${modelCommand.model}.\nStarted a new ${modelCommand.model} chat automatically.`
+              );
+            }).catch(async (err) => {
+              session.autoNewChatPending = true;
+              session.chatSelected = true;
+              console.error('model switch auto-newchat error:', err.message);
+              await sendReply(message.chat.id, message.message_id, `Error: ${err.message}`);
+            });
           }
           continue;
         }
@@ -1183,6 +1401,7 @@ async function main() {
             session.chatSelected = true;
             session.selectedChatKey = '';
             session.selectedChatTitle = '(new chat started via /newchat)';
+            session.autoNewChatPending = false;
             await sendReply(message.chat.id, message.message_id, `Started a new ${currentModel} chat.`);
           }).catch(async (err) => {
             console.error('newchat error:', err.message);
@@ -1239,6 +1458,7 @@ async function main() {
             session.chatSelected = true;
             session.selectedChatKey = toChatRefKey(selected);
             session.selectedChatTitle = formatChatTitlePreview(selected.title, currentModel);
+            session.autoNewChatPending = false;
             await sendReply(
               message.chat.id,
               message.message_id,
@@ -1283,43 +1503,90 @@ async function main() {
           continue;
         }
         const directive = parseChatContextDirective(prompt);
+        if (directive.error) {
+          await sendReply(message.chat.id, message.message_id, directive.error);
+          continue;
+        }
         const promptWithMode = applyTelegramPromptMode(directive.prompt);
-        if (!promptWithMode) {
+        if (!promptWithMode && (!directive.messageIds || !directive.messageIds.length)) {
           await sendReply(
             message.chat.id,
             message.message_id,
-            'Usage: [[last:20]] <message> or [[last:20:all]] <message> (also works with leading ~).'
+            'Usage: [[include:400-402,404,407]] <message> (also works with leading ~).'
           );
           continue;
         }
 
-        let promptForAi = promptWithMode;
-        const extraContextBlocks = [];
-        if (directive.count > 0) {
-          const chatContext = buildChatContext(
-            recentMessageHistoryByChatId,
-            telegramChatId,
-            message.message_id,
-            directive.count,
-            directive.includeBots
-          );
-          if (chatContext) {
-            const contextLabel = directive.includeBots
-              ? `Chat context (last ${directive.count} messages, including bot):`
-              : `Chat context (last ${directive.count} non-bot messages):`;
-            extraContextBlocks.push([contextLabel, chatContext].join('\n'));
+        if (directive.messageIds && directive.messageIds.length) {
+          if (!TELEGRAM_INCLUDE_CHANNEL_ID) {
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              'Include directive requires TELEGRAM_INCLUDE_CHANNEL_ID to be set to a private channel ID where the bot is admin.'
+            );
+            continue;
           }
-        }
-        const replyQuoteContext = buildReplyQuoteContext(message);
-        if (replyQuoteContext) extraContextBlocks.push(replyQuoteContext);
-        if (extraContextBlocks.length) {
-          promptForAi = [
-            ...extraContextBlocks,
-            `User request: ${promptWithMode}`,
-          ].join('\n\n');
+          if (!/^-?\d+$/.test(TELEGRAM_INCLUDE_CHANNEL_ID)) {
+            await sendReply(
+              message.chat.id,
+              message.message_id,
+              'TELEGRAM_INCLUDE_CHANNEL_ID must be a numeric chat ID (example: -1001234567890).'
+            );
+            continue;
+          }
         }
 
         queue = queue.then(async () => {
+          if (currentModel !== 'none' && session.autoNewChatPending) {
+            await bridge.startNewChat(currentModel);
+            session.autoNewChatPending = false;
+            session.chatSelected = true;
+            session.selectedChatKey = '';
+            session.selectedChatTitle = '(new chat started automatically)';
+          }
+          let promptForAi = promptWithMode;
+          const extraContextBlocks = [];
+          if (directive.truncated) {
+            extraContextBlocks.push(
+              `Include directive exceeded max ${CHAT_CONTEXT_DIRECTIVE_MAX} message IDs; using first ${CHAT_CONTEXT_DIRECTIVE_MAX}.`
+            );
+          }
+          if (directive.messageIds && directive.messageIds.length) {
+          const includeResult = await buildIncludedMessagesContext({
+            sourceChatId: telegramChatId,
+            sourceHistoryChatId: telegramChatId,
+            sourceMessageIds: directive.messageIds,
+            includeChannelId: TELEGRAM_INCLUDE_CHANNEL_ID,
+            historyMap: recentMessageHistoryByChatId,
+          });
+            if (includeResult.context) {
+              extraContextBlocks.push(
+                ['Included messages by Telegram message ID:', includeResult.context].join('\n')
+              );
+            }
+            if (includeResult.missingIds && includeResult.missingIds.length) {
+              extraContextBlocks.push(
+                `Unavailable message IDs: ${includeResult.missingIds.join(', ')}`
+              );
+            }
+            if (!includeResult.context && (!promptWithMode || !promptWithMode.trim())) {
+              await sendReply(
+                message.chat.id,
+                message.message_id,
+                `Could not resolve requested message IDs: ${directive.messageIds.join(', ')}`
+              );
+              return;
+            }
+          }
+          if (extraContextBlocks.length) {
+            const requestLine = promptWithMode
+              ? `User request: ${promptWithMode}`
+              : 'User request: Analyze the included messages.';
+            promptForAi = [
+              ...extraContextBlocks,
+              requestLine,
+            ].join('\n\n');
+          }
           await telegramCall('sendChatAction', { chat_id: message.chat.id, action: 'typing' });
           const answer = await bridge.ask(promptForAi, currentModel);
           const formattedAnswer = formatModelReplyForTelegram(answer);

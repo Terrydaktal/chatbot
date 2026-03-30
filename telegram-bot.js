@@ -505,8 +505,8 @@ function buildHelpText(botUsername) {
     'Telegram Bot Help',
     '',
     'Setup (required per chat):',
-    '1. /model <geminifast|aimode|none>',
-    '2. /newchat  (or /chat then /chat <number>)',
+    '1. Default model is aimode (or change with /model <geminifast|aimode|none>)',
+    '2. Run /newchat  (or /chat then /chat <number>)',
     '',
     'Commands:',
     '/help - Show this help text',
@@ -637,10 +637,41 @@ function formatChatTitlePreview(title, model) {
   return `${clean.slice(0, AI_MODE_CHAT_PREVIEW_MAX - 3).trimEnd()}...`;
 }
 
-function formatChatsReply(chats, model) {
-  if (!chats.length) return 'No recent chats found.';
-  const lines = chats.map((chat, idx) => `${idx + 1}. ${formatChatTitlePreview(chat.title, model)}`);
-  return `Recent chats:\n${lines.join('\n')}\n\nUse /chat <number> to switch.`;
+function toChatRefKey(chat) {
+  if (!chat) return '';
+  const href = (chat.href || '').trim();
+  const clickIndex = Number.isInteger(chat.clickIndex) ? chat.clickIndex : -1;
+  const title = (chat.title || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  return `${href}|${clickIndex}|${title}`;
+}
+
+function formatChatsReply(chats, model, session = null) {
+  const selectedKey = session && session.selectedChatKey ? session.selectedChatKey : '';
+  const hasSelected = Boolean(session && session.chatSelected);
+  const selectedTitle = session && session.selectedChatTitle ? session.selectedChatTitle : '';
+
+  const selectedIndex = selectedKey
+    ? chats.findIndex((chat) => toChatRefKey(chat) === selectedKey)
+    : -1;
+
+  const selectedLine = (() => {
+    if (!hasSelected) return 'Current selected chat: (none)';
+    if (selectedIndex >= 0) {
+      return `Current selected chat: ${selectedIndex + 1}. ${formatChatTitlePreview(chats[selectedIndex].title, model)}`;
+    }
+    if (selectedTitle) return `Current selected chat: ${selectedTitle}`;
+    return 'Current selected chat: (active, not in recent list)';
+  })();
+
+  if (!chats.length) {
+    return `${selectedLine}\n\nNo recent chats found.`;
+  }
+
+  const lines = chats.map((chat, idx) => {
+    const base = `${idx + 1}. ${formatChatTitlePreview(chat.title, model)}`;
+    return idx === selectedIndex ? `${base} [selected]` : base;
+  });
+  return `${selectedLine}\n\nRecent chats:\n${lines.join('\n')}\n\nUse /chat <number> to switch.`;
 }
 
 function chunkText(text, maxLen) {
@@ -703,7 +734,7 @@ function detectTriggerType(message, text, entities) {
 function getChatSession(sessionByChatId, chatId) {
   const existing = sessionByChatId.get(chatId);
   if (existing) return existing;
-  const created = { model: '', chatSelected: false };
+  const created = { model: 'aimode', chatSelected: false, selectedChatKey: '', selectedChatTitle: '' };
   sessionByChatId.set(chatId, created);
   return created;
 }
@@ -721,7 +752,7 @@ async function main() {
   console.log(`Telegram bot ready as @${botUsername || 'unknown'}.`);
   console.log(`Trigger username: ${TELEGRAM_TRIGGER_USERNAME ? '@' + TELEGRAM_TRIGGER_USERNAME : '(reply-only mode)'}`);
   console.log(`Browser endpoint: http://127.0.0.1:${BROWSER_PORT}`);
-  console.log('Startup state: model=(not set), chat=(not selected)');
+  console.log('Startup state: default model=aimode, chat=(not selected)');
 
   let offset = 0;
   let queue = Promise.resolve();
@@ -793,6 +824,8 @@ async function main() {
           }
           session.model = modelCommand.model;
           session.chatSelected = false;
+          session.selectedChatKey = '';
+          session.selectedChatTitle = '';
           recentChatsByTelegramChatId.delete(telegramChatId);
           if (modelCommand.model === 'none') {
             await sendReply(
@@ -831,6 +864,8 @@ async function main() {
           queue = queue.then(async () => {
             await bridge.startNewChat(currentModel);
             session.chatSelected = true;
+            session.selectedChatKey = '';
+            session.selectedChatTitle = '(new chat started via /newchat)';
             await sendReply(message.chat.id, message.message_id, `Started a new ${currentModel} chat.`);
           }).catch(async (err) => {
             console.error('newchat error:', err.message);
@@ -866,7 +901,7 @@ async function main() {
             if (chatCommand.list) {
               const chats = await bridge.listRecentChats(currentModel, 20);
               recentChatsByTelegramChatId.set(telegramChatId, chats.map((c) => ({ ...c, model: currentModel })));
-              await sendReply(message.chat.id, message.message_id, formatChatsReply(chats, currentModel));
+              await sendReply(message.chat.id, message.message_id, formatChatsReply(chats, currentModel, session));
               return;
             }
             const chats = recentChatsByTelegramChatId.get(telegramChatId) || [];
@@ -885,6 +920,8 @@ async function main() {
             }
             await bridge.selectChat(selected);
             session.chatSelected = true;
+            session.selectedChatKey = toChatRefKey(selected);
+            session.selectedChatTitle = formatChatTitlePreview(selected.title, currentModel);
             await sendReply(
               message.chat.id,
               message.message_id,

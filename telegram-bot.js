@@ -598,22 +598,90 @@ async function telegramCall(method, payload) {
   return json.result;
 }
 
-async function sendReply(chatId, replyToMessageId, text) {
-  const chunks = chunkText(text || '(No response)', TELEGRAM_MAX_MESSAGE);
+async function sendReply(chatId, replyToMessageId, payload) {
+  const isRich = payload && typeof payload === 'object' && !Array.isArray(payload);
+  const text = isRich ? String(payload.text || '') : String(payload || '');
+  const parseMode = isRich && payload.parseMode ? String(payload.parseMode) : '';
+  const normalized = text || '(No response)';
+  const chunks = parseMode === 'HTML'
+    ? chunkHtmlText(normalized, TELEGRAM_MAX_MESSAGE)
+    : chunkText(normalized, TELEGRAM_MAX_MESSAGE);
   for (let i = 0; i < chunks.length; i += 1) {
-    await telegramCall('sendMessage', {
+    const messagePayload = {
       chat_id: chatId,
       text: chunks[i],
       reply_to_message_id: i === 0 ? replyToMessageId : undefined,
       allow_sending_without_reply: true,
       disable_web_page_preview: true,
-    });
+    };
+    if (parseMode) messagePayload.parse_mode = parseMode;
+    await telegramCall('sendMessage', messagePayload);
   }
+}
+
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function parseSourceReferences(text) {
+  const sourceMap = new Map();
+  const kept = [];
+  const lines = String(text || '').split('\n');
+  const sourceLine = /^\[(\d+)\]\s+\[[^\]]+\]\((https?:\/\/[^)\s]+(?:\)[^)\s]*)?)\)\s*$/i;
+  for (const line of lines) {
+    const m = line.trim().match(sourceLine);
+    if (m) {
+      sourceMap.set(Number(m[1]), m[2]);
+      continue;
+    }
+    kept.push(line);
+  }
+  return {
+    body: kept.join('\n').replace(/\n{3,}/g, '\n\n').trim(),
+    sourceMap,
+  };
+}
+
+function inlineCitationsAsHtml(text, sourceMap) {
+  if (!sourceMap || !sourceMap.size) return escapeHtml(text);
+  const placeholders = new Map();
+  let seq = 0;
+  const withTokens = String(text || '').replace(/\[(\s*\d+\s*(?:,\s*\d+\s*)*)\]/g, (full, numsRaw) => {
+    const nums = numsRaw
+      .split(',')
+      .map((n) => Number(n.trim()))
+      .filter((n) => Number.isInteger(n) && n > 0);
+    if (!nums.length) return full;
+
+    let linkedCount = 0;
+    const rendered = nums.map((n) => {
+      const url = sourceMap.get(n);
+      if (!url) return String(n);
+      linkedCount += 1;
+      return `<a href="${escapeHtml(url)}">${n}</a>`;
+    });
+    if (!linkedCount) return full;
+
+    const key = `__CITE_${seq++}__`;
+    placeholders.set(key, `[${rendered.join(', ')}]`);
+    return key;
+  });
+
+  let escaped = escapeHtml(withTokens);
+  for (const [key, html] of placeholders) {
+    escaped = escaped.split(key).join(html);
+  }
+  return escaped;
 }
 
 function formatModelReplyForTelegram(text) {
   let output = (text || '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
-  if (!output) return '(No response)';
+  if (!output) return { text: '(No response)', parseMode: 'HTML' };
 
   const hasLineBreaks = output.includes('\n');
   if (!hasLineBreaks) {
@@ -622,12 +690,16 @@ function formatModelReplyForTelegram(text) {
       .replace(/\s([A-Z][A-Za-z'() -]{2,40}:)\s+/g, '\n- $1 ');
   }
 
-  return output
+  const normalized = output
     .split('\n')
     .map((line) => line.replace(/[ \t]+/g, ' ').trimEnd())
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+
+  const { body, sourceMap } = parseSourceReferences(normalized);
+  const htmlText = inlineCitationsAsHtml(body || normalized, sourceMap);
+  return { text: htmlText || '(No response)', parseMode: 'HTML' };
 }
 
 function formatChatTitlePreview(title, model) {
@@ -683,6 +755,33 @@ function chunkText(text, maxLen) {
     if (end < text.length) {
       const lastBreak = text.lastIndexOf('\n', end);
       if (lastBreak > start + 500) end = lastBreak;
+    }
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
+function isInsideHtmlTag(text, index) {
+  const lt = text.lastIndexOf('<', index - 1);
+  if (lt < 0) return false;
+  const gt = text.lastIndexOf('>', index - 1);
+  return lt > gt;
+}
+
+function chunkHtmlText(text, maxLen) {
+  if (text.length <= maxLen) return [text];
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + maxLen, text.length);
+    if (end < text.length) {
+      let cut = text.lastIndexOf('\n', end);
+      if (cut <= start + 200) cut = text.lastIndexOf(' ', end);
+      if (cut > start + 50) end = cut;
+      while (end > start + 50 && isInsideHtmlTag(text, end)) {
+        end -= 1;
+      }
     }
     chunks.push(text.slice(start, end));
     start = end;

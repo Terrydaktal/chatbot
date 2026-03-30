@@ -356,7 +356,21 @@ function extractPrompt(message) {
   return body;
 }
 
-function parseIncludeMessageIds(spec) {
+function parseIncludeBoundary(token, options = {}) {
+  const raw = String(token || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (raw === 'current') {
+    const currentMessageId = Number(options.currentMessageId || 0);
+    if (!Number.isInteger(currentMessageId) || currentMessageId <= 0) return null;
+    return currentMessageId;
+  }
+  if (!/^\d+$/.test(raw)) return null;
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) return null;
+  return id;
+}
+
+function parseIncludeMessageIds(spec, options = {}) {
   const out = [];
   const seen = new Set();
   const parts = String(spec || '')
@@ -366,10 +380,10 @@ function parseIncludeMessageIds(spec) {
   if (!parts.length) return null;
 
   for (const part of parts) {
-    const range = part.match(/^(\d+)\s*-\s*(\d+)$/);
+    const range = part.match(/^([a-zA-Z0-9_]+)\s*-\s*([a-zA-Z0-9_]+)$/);
     if (range) {
-      const start = Number(range[1]);
-      const end = Number(range[2]);
+      const start = parseIncludeBoundary(range[1], options);
+      const end = parseIncludeBoundary(range[2], options);
       if (!Number.isInteger(start) || !Number.isInteger(end) || start <= 0 || end <= 0) return null;
       const step = start <= end ? 1 : -1;
       for (let id = start; step > 0 ? id <= end : id >= end; id += step) {
@@ -379,8 +393,7 @@ function parseIncludeMessageIds(spec) {
       }
       continue;
     }
-    if (!/^\d+$/.test(part)) return null;
-    const id = Number(part);
+    const id = parseIncludeBoundary(part, options);
     if (!Number.isInteger(id) || id <= 0) return null;
     if (seen.has(id)) continue;
     seen.add(id);
@@ -389,38 +402,30 @@ function parseIncludeMessageIds(spec) {
   return out;
 }
 
-function parseChatContextDirective(prompt) {
+function parseChatContextDirective(prompt, options = {}) {
   const input = (prompt || '').trim();
   if (!input) return { messageIds: [], prompt: '' };
 
-  const direct = input.match(/^\[\[include:([^\]]+)\]\]\s*/i);
-  if (direct) {
-    const parsed = parseIncludeMessageIds(direct[1]);
-    if (!parsed || !parsed.length) {
-      return { messageIds: [], prompt: input.slice(direct[0].length).trim(), error: 'Invalid include list. Use [[include:400-402,404,407]].' };
-    }
+  const include = input.match(/\[\[include:([^\]]+)\]\]/i);
+  if (!include) return { messageIds: [], prompt: input };
+
+  const parsed = parseIncludeMessageIds(include[1], options);
+  const before = input.slice(0, include.index || 0).trim();
+  const after = input.slice((include.index || 0) + include[0].length).trim();
+  const remainingPrompt = [before, after].filter(Boolean).join(' ').trim();
+
+  if (!parsed || !parsed.length) {
     return {
-      messageIds: parsed.slice(0, CHAT_CONTEXT_DIRECTIVE_MAX),
-      prompt: input.slice(direct[0].length).trim(),
-      truncated: parsed.length > CHAT_CONTEXT_DIRECTIVE_MAX,
+      messageIds: [],
+      prompt: remainingPrompt,
+      error: 'Invalid include list. Use [[include:400-402,404,407]] or [[include:1385-current]].',
     };
   }
-
-  const conciseFirst = input.match(/^~\s*\[\[include:([^\]]+)\]\]\s*/i);
-  if (conciseFirst) {
-    const parsed = parseIncludeMessageIds(conciseFirst[1]);
-    const rest = input.slice(conciseFirst[0].length).trim();
-    if (!parsed || !parsed.length) {
-      return { messageIds: [], prompt: rest ? `~ ${rest}` : '~', error: 'Invalid include list. Use [[include:400-402,404,407]].' };
-    }
-    return {
-      messageIds: parsed.slice(0, CHAT_CONTEXT_DIRECTIVE_MAX),
-      prompt: rest ? `~ ${rest}` : '~',
-      truncated: parsed.length > CHAT_CONTEXT_DIRECTIVE_MAX,
-    };
-  }
-
-  return { messageIds: [], prompt: input };
+  return {
+    messageIds: parsed.slice(0, CHAT_CONTEXT_DIRECTIVE_MAX),
+    prompt: remainingPrompt,
+    truncated: parsed.length > CHAT_CONTEXT_DIRECTIVE_MAX,
+  };
 }
 
 function applyTelegramPromptMode(prompt) {
@@ -682,6 +687,7 @@ function buildHelpText(botUsername) {
     '',
     'Extra context directives (start of prompt):',
     '- [[include:400-402,404,407]] include exact Telegram message IDs',
+    '- [[include:1385-current]] include a range up to the trigger message ID',
     '- Works with concise mode too: ~ [[include:400-402,404]] ...',
     '- Requires TELEGRAM_INCLUDE_CHANNEL_ID (private channel where bot is admin)',
   ].join('\n');
@@ -950,6 +956,40 @@ function inlineCitationsAsHtml(text, sourceMap) {
   return escaped;
 }
 
+function applyBasicMarkdownToTelegramHtml(text) {
+  const placeholders = new Map();
+  let seq = 0;
+  const stash = (value) => {
+    const key = `__MD_SEG_${seq++}__`;
+    placeholders.set(key, value);
+    return key;
+  };
+
+  let out = String(text || '');
+
+  out = out.replace(/```[ \t]*([^\n`]*)\n([\s\S]*?)```/g, (_full, _lang, code) => {
+    const trimmed = String(code || '').replace(/\n+$/, '');
+    return stash(`<pre><code>${trimmed}</code></pre>`);
+  });
+
+  out = out.replace(/`([^`\n]+)`/g, (_full, code) => stash(`<code>${code}</code>`));
+
+  out = out
+    .replace(/^\s{0,3}#{1,6}\s+(.+)$/gm, '<b>$1</b>')
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/^\s*[-*]\s+/gm, '• ');
+
+  for (const [key, value] of placeholders) {
+    out = out.split(key).join(value);
+  }
+  return out;
+}
+
+function formatTelegramHtmlFromModelText(text, sourceMap) {
+  const withCitations = inlineCitationsAsHtml(text, sourceMap);
+  return applyBasicMarkdownToTelegramHtml(withCitations);
+}
+
 function splitMarkdownRow(line) {
   let row = String(line || '').trim();
   if (row.startsWith('|')) row = row.slice(1);
@@ -1079,6 +1119,12 @@ async function renderMarkdownTableToPng(markdown) {
 function formatModelReplyForTelegram(text) {
   let output = (text || '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
   if (!output) return { text: '(No response)', parseMode: 'HTML' };
+  output = output
+    .split('\n')
+    .filter((line) => !/^export to sheets$/i.test(String(line || '').trim()))
+    .join('\n')
+    .trim();
+  if (!output) return { text: '(No response)', parseMode: 'HTML' };
 
   const hasLineBreaks = output.includes('\n');
   if (!hasLineBreaks) {
@@ -1104,14 +1150,14 @@ function formatModelReplyForTelegram(text) {
         parts.push({ type: 'table', markdown: seg.markdown });
         continue;
       }
-      const html = inlineCitationsAsHtml(seg.text || '', sourceMap).trim();
+      const html = formatTelegramHtmlFromModelText(seg.text || '', sourceMap).trim();
       if (html) parts.push({ type: 'text', text: html, parseMode: 'HTML' });
     }
     if (!parts.length) return { text: '(No response)', parseMode: 'HTML' };
     return { parts };
   }
 
-  const htmlText = inlineCitationsAsHtml(base, sourceMap);
+  const htmlText = formatTelegramHtmlFromModelText(base, sourceMap);
   return { text: htmlText || '(No response)', parseMode: 'HTML' };
 }
 
@@ -1502,7 +1548,7 @@ async function main() {
           await sendReply(message.chat.id, message.message_id, 'I saw the trigger, but there was no message text to send.');
           continue;
         }
-        const directive = parseChatContextDirective(prompt);
+        const directive = parseChatContextDirective(prompt, { currentMessageId: message.message_id });
         if (directive.error) {
           await sendReply(message.chat.id, message.message_id, directive.error);
           continue;
@@ -1512,7 +1558,7 @@ async function main() {
           await sendReply(
             message.chat.id,
             message.message_id,
-            'Usage: [[include:400-402,404,407]] <message> (also works with leading ~).'
+            'Usage: [[include:400-402,404,407]] or [[include:1385-current]] <message> (also works with leading ~).'
           );
           continue;
         }

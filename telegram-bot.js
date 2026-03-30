@@ -598,8 +598,84 @@ async function telegramCall(method, payload) {
   return json.result;
 }
 
+async function telegramCallMultipart(method, formData) {
+  const response = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
+    method: 'POST',
+    body: formData,
+  });
+  if (!response.ok) {
+    throw new Error(`Telegram HTTP ${response.status}`);
+  }
+  const json = await response.json();
+  if (!json.ok) {
+    throw new Error(`Telegram API error: ${json.description || 'unknown error'}`);
+  }
+  return json.result;
+}
+
+async function sendPhotoReply(chatId, replyToMessageId, photoBuffer, caption = '') {
+  const form = new FormData();
+  form.set('chat_id', String(chatId));
+  if (replyToMessageId) form.set('reply_to_message_id', String(replyToMessageId));
+  form.set('allow_sending_without_reply', 'true');
+  if (caption) form.set('caption', String(caption).slice(0, 1024));
+  form.append('photo', new Blob([photoBuffer], { type: 'image/png' }), 'table.png');
+  await telegramCallMultipart('sendPhoto', form);
+}
+
 async function sendReply(chatId, replyToMessageId, payload) {
   const isRich = payload && typeof payload === 'object' && !Array.isArray(payload);
+  if (isRich && Array.isArray(payload.parts)) {
+    let firstMessageId = replyToMessageId;
+    for (const part of payload.parts) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'table') {
+        try {
+          const png = await renderMarkdownTableToPng(String(part.markdown || ''));
+          if (png && png.length) {
+            await sendPhotoReply(chatId, firstMessageId, png);
+            firstMessageId = undefined;
+            continue;
+          }
+        } catch (err) {
+          console.error(`table render error: ${err.message}`);
+        }
+        const fallback = String(part.markdown || '').trim() || '(table)';
+        const chunks = chunkText(fallback, TELEGRAM_MAX_MESSAGE);
+        for (let i = 0; i < chunks.length; i += 1) {
+          await telegramCall('sendMessage', {
+            chat_id: chatId,
+            text: chunks[i],
+            reply_to_message_id: firstMessageId,
+            allow_sending_without_reply: true,
+            disable_web_page_preview: true,
+          });
+          firstMessageId = undefined;
+        }
+        continue;
+      }
+
+      const partText = String(part.text || '');
+      const partParseMode = part.parseMode ? String(part.parseMode) : '';
+      const partChunks = partParseMode === 'HTML'
+        ? chunkHtmlText(partText || '(No response)', TELEGRAM_MAX_MESSAGE)
+        : chunkText(partText || '(No response)', TELEGRAM_MAX_MESSAGE);
+      for (let i = 0; i < partChunks.length; i += 1) {
+        const messagePayload = {
+          chat_id: chatId,
+          text: partChunks[i],
+          reply_to_message_id: firstMessageId,
+          allow_sending_without_reply: true,
+          disable_web_page_preview: true,
+        };
+        if (partParseMode) messagePayload.parse_mode = partParseMode;
+        await telegramCall('sendMessage', messagePayload);
+        firstMessageId = undefined;
+      }
+    }
+    return;
+  }
+
   const text = isRich ? String(payload.text || '') : String(payload || '');
   const parseMode = isRich && payload.parseMode ? String(payload.parseMode) : '';
   const normalized = text || '(No response)';
@@ -679,6 +755,132 @@ function inlineCitationsAsHtml(text, sourceMap) {
   return escaped;
 }
 
+function splitMarkdownRow(line) {
+  let row = String(line || '').trim();
+  if (row.startsWith('|')) row = row.slice(1);
+  if (row.endsWith('|')) row = row.slice(0, -1);
+  return row.split('|').map((cell) => cell.trim().replace(/\\\|/g, '|'));
+}
+
+function isMarkdownTableSeparator(line) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(String(line || ''));
+}
+
+function looksLikeMarkdownTableHeader(line) {
+  const raw = String(line || '');
+  if (!raw.includes('|')) return false;
+  const cells = splitMarkdownRow(raw);
+  return cells.length >= 2 && cells.some((c) => c.length > 0);
+}
+
+function splitMarkdownTables(text) {
+  const lines = String(text || '').split('\n');
+  const parts = [];
+  const pendingText = [];
+  const flushText = () => {
+    const block = pendingText.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    pendingText.length = 0;
+    if (block) parts.push({ type: 'text', text: block });
+  };
+
+  for (let i = 0; i < lines.length;) {
+    const a = lines[i] || '';
+    const b = lines[i + 1] || '';
+    if (i + 1 < lines.length && looksLikeMarkdownTableHeader(a) && isMarkdownTableSeparator(b)) {
+      flushText();
+      const tableLines = [a, b];
+      i += 2;
+      while (i < lines.length) {
+        const cur = lines[i] || '';
+        if (!cur.trim()) break;
+        if (!cur.includes('|')) break;
+        tableLines.push(cur);
+        i += 1;
+      }
+      parts.push({ type: 'table', markdown: tableLines.join('\n').trim() });
+      continue;
+    }
+    pendingText.push(a);
+    i += 1;
+  }
+  flushText();
+  return parts;
+}
+
+function parseMarkdownTable(markdown) {
+  const lines = String(markdown || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return null;
+  if (!looksLikeMarkdownTableHeader(lines[0]) || !isMarkdownTableSeparator(lines[1])) return null;
+  const headers = splitMarkdownRow(lines[0]);
+  if (headers.length < 2) return null;
+  const rows = [];
+  for (let i = 2; i < lines.length; i += 1) {
+    if (!lines[i].includes('|')) continue;
+    const row = splitMarkdownRow(lines[i]);
+    if (!row.length) continue;
+    while (row.length < headers.length) row.push('');
+    if (row.length > headers.length) row.length = headers.length;
+    rows.push(row);
+  }
+  return { headers, rows };
+}
+
+function buildTableHtml(table) {
+  const head = table.headers.map((cell) => `<th>${escapeHtml(cell)}</th>`).join('');
+  const body = table.rows.map((row) => {
+    const cells = row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join('');
+    return `<tr>${cells}</tr>`;
+  }).join('');
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body { margin: 0; padding: 16px; background: #f4f6fb; }
+    #capture { display: inline-block; background: #ffffff; padding: 8px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
+    table { border-collapse: collapse; font-family: "Segoe UI", Arial, sans-serif; font-size: 14px; color: #1f2937; }
+    th, td { border: 1px solid #d1d5db; padding: 8px 10px; text-align: left; vertical-align: top; }
+    th { background: #0ea5e9; color: #ffffff; font-weight: 600; }
+    tr:nth-child(even) td { background: #f8fafc; }
+  </style>
+</head>
+<body>
+  <div id="capture">
+    <table>
+      <thead><tr>${head}</tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>
+</body>
+</html>`;
+}
+
+async function renderMarkdownTableToPng(markdown) {
+  const table = parseMarkdownTable(markdown);
+  if (!table) return null;
+
+  const browser = await puppeteer.connect({
+    browserURL: `http://127.0.0.1:${BROWSER_PORT}`,
+    defaultViewport: null,
+  });
+  let page = null;
+  try {
+    page = await browser.newPage();
+    await page.setViewport({ width: 1400, height: 900, deviceScaleFactor: 2 });
+    await page.setContent(buildTableHtml(table), { waitUntil: 'domcontentloaded' });
+    const capture = await page.$('#capture');
+    if (!capture) return null;
+    const png = await capture.screenshot({ type: 'png' });
+    return Buffer.isBuffer(png) ? png : Buffer.from(png);
+  } finally {
+    if (page && !page.isClosed()) await page.close().catch(() => {});
+    await browser.disconnect().catch(() => {});
+  }
+}
+
 function formatModelReplyForTelegram(text) {
   let output = (text || '').replace(/\r\n?/g, '\n').replace(/\u00a0/g, ' ').trim();
   if (!output) return { text: '(No response)', parseMode: 'HTML' };
@@ -698,7 +900,23 @@ function formatModelReplyForTelegram(text) {
     .trim();
 
   const { body, sourceMap } = parseSourceReferences(normalized);
-  const htmlText = inlineCitationsAsHtml(body || normalized, sourceMap);
+  const base = body || normalized;
+  const segments = splitMarkdownTables(base);
+  if (segments.some((s) => s.type === 'table')) {
+    const parts = [];
+    for (const seg of segments) {
+      if (seg.type === 'table') {
+        parts.push({ type: 'table', markdown: seg.markdown });
+        continue;
+      }
+      const html = inlineCitationsAsHtml(seg.text || '', sourceMap).trim();
+      if (html) parts.push({ type: 'text', text: html, parseMode: 'HTML' });
+    }
+    if (!parts.length) return { text: '(No response)', parseMode: 'HTML' };
+    return { parts };
+  }
+
+  const htmlText = inlineCitationsAsHtml(base, sourceMap);
   return { text: htmlText || '(No response)', parseMode: 'HTML' };
 }
 

@@ -17,7 +17,7 @@ A command-line interface for interacting with Google Gemini and Google AI Mode (
   - **Local File Inclusion:** `@include "filename"` inlines file content.
   - **One-Sentence Mode:** `~ <prompt>` requests a concise, one-sentence response.
 - **Resilient Automation:** Handles reloads and recovers from stale sessions.
-- **Telegram Bridge:** Optional bot that triggers on `@username` mentions or replies and sends responses back as quoted replies.
+- **Telegram Bridge:** Optional bot that triggers on `@username` mentions, supports per-chat model/chat control, and can inject forwarded context with `[[include]]`.
 
 ## Prerequisites
 
@@ -143,33 +143,68 @@ Use `--help` for all flags (connect to existing Chrome, reuse target, etc.).
 
 ### Behavior
 
-- `/newchat` starts a fresh chat in the current model.
-- `/chat` returns a numbered list of recent chats in the current model.
-- `/chat <number>` switches to a chat from the latest `/chat` list for that Telegram chat.
-- `/help` shows Telegram bot usage and trigger instructions.
-- `/whoami` shows your Telegram `user_id` (plus username/chat ID).
-- `/model` shows current model for that Telegram chat.
-- `/model geminifast`, `/model aimode`, or `/model none` sets the mode (`none` disables prompt responses in that Telegram chat).
-- On startup per Telegram chat, model and chat are unset. You must run `/model ...` and then `/newchat` or `/chat <number>` before prompts will be sent.
-- `[[last:X]]` at the start of a triggered message prepends the last `X` non-bot chat messages as context (max `50`), for example `@YourBot [[last:20]] Summarize`.
-- `[[last:X:all]]` includes bot messages too (including this chatbot's own replies), for example `@YourBot [[last:20:all]] Summarize`.
-- A message is processed when:
-  - It contains `@TELEGRAM_TRIGGER_USERNAME`, or
-  - It is a reply to another message.
-- The bot responds by replying to that Telegram message (`reply_to_message_id`), so the response is quoted/threaded.
-- Switching chats does not dump existing Gemini history into Telegram.
-- On startup, the bot registers Telegram command menu entries via `setMyCommands` for default, private-chat, and group-chat scopes.
+- Trigger rule: the message must contain `@TELEGRAM_TRIGGER_USERNAME`.
+- Replies without a tag do not trigger.
+- Forwarded messages sent to the bot in private chat are staging input only (they do not trigger prompts).
+- The bot replies to the triggering message (`reply_to_message_id`), so responses stay threaded.
+- Switching chats does not dump prior AI chat content into Telegram.
+- On startup, the bot registers command menu entries via `setMyCommands` (default/private/group scopes).
+
+#### Commands
+
+- `/help`: show Telegram bot usage and trigger rules.
+- `/whoami`: show your Telegram `user_id`, username, and chat ID.
+- `/model`: show current model and available models.
+- `/model aimode`: set model to **AI Mode**.
+- `/model geminifast`: set model to **Gemini Fast (3.0 Flash)**.
+- `/model geminithinking`: set model to **Gemini Thinking (3.0 Flash Thinking)**.
+- `/model none`: disable prompt responses for that Telegram chat.
+- `/newchat`: start a fresh chat in the current model.
+- `/chat`: list recent chats in the current model and show the currently selected chat.
+- `/chat <number>`: switch to a chat from the latest `/chat` list.
+
+#### Model aliases
+
+- `aimode`: `ai`, `ai-mode`
+- `geminifast`: `fast`, `flash`, `gemini`
+- `geminithinking`: `thinking`, `think`, `geminipro`, `pro`, `advanced`
+- `none`: `off`, `silent`
+
+#### Per-chat startup state
+
+- New Telegram chats default to model `aimode`.
+- Chat selection starts in `auto new chat pending`.
+- The first prompt (or `/model` change away from `none`) auto-starts a new browser chat.
+
+#### Include forwarded context (`[[include]]`)
+
+- Send forwarded messages to your private chat with the bot first.
+- Then send a tagged prompt with `[[include]]` in the destination group/chat.
+- The bot will consume forwarded staging messages from the last 5 minutes, prepend them as context, and delete consumed staging messages from private chat.
+- Include prompt format sent to AI:
+  - `Forwarded messages:`
+  - `<sender>: <message>`
+  - `Analyze the included messages.` (unless you provided your own trailing prompt text)
+- Forwarded images are downloaded and uploaded into the AI chat when uploader support is available.
+- Max included images per request: `8`.
+
+#### Limits and formatting
+
+- Prompt payload (including injected include context) is capped at `8192` characters.
+- Name mapping (if configured) is applied before send and reversed on AI output.
+- Telegram output uses HTML formatting mode where possible.
 
 ### Environment Variables
 
 - `TELEGRAM_BOT_TOKEN` (required): Bot token from BotFather.
-- `TELEGRAM_TRIGGER_USERNAME` (optional): Mention trigger username without `@`. If omitted, only replies trigger.
+- `TELEGRAM_TRIGGER_USERNAME` (required in practice): Mention trigger username without `@`.
 - `BROWSER_PORT` (optional, default `9233`): Chromium remote debugging port.
 - `GEMINI_URL` (optional): Override Gemini URL.
 - `AI_MODE_URL` (optional): Override AI Mode URL.
 - `TELEGRAM_POLL_TIMEOUT_SECONDS` (optional, default `30`): Telegram long-poll timeout.
 - `TELEGRAM_ALLOWED_CHAT_IDS` (optional): Comma-separated allowlist of chat IDs.
 - `TELEGRAM_ALLOWED_USER_IDS` (optional): Comma-separated allowlist of Telegram numeric user IDs. If set, only those users can interact with the bot.
+- `TELEGRAM_NAME_MAP_TSV` (optional): Path to TSV name mapping file (default: `$XDG_CONFIG_HOME/chatbot/name-map.tsv` or `~/.config/chatbot/name-map.tsv`).
 
 ### Run
 
